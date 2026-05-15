@@ -110,3 +110,105 @@ class FindOsmSegmentsTests(unittest.TestCase):
                 places=9,
             )
 
+    def test_calculate_distance_registers_haversine_and_cleans_up_with_seeded_random_inputs(self):
+        generator = random.Random(701)
+
+        class RecordingConnection:
+            def __init__(self):
+                self.execute_calls = []
+                self.create_function_calls = []
+                self.closed = False
+
+            def execute(self, query):
+                self.execute_calls.append(query)
+
+            def create_function(self, *args):
+                self.create_function_calls.append(args)
+
+            def close(self):
+                self.closed = True
+
+        connection = RecordingConnection()
+        points_filepath = f"/tmp/points_{generator.randint(100, 999)}.parquet"
+        osm_filepath = f"/tmp/osm_{generator.randint(100, 999)}.parquet"
+        saving_filedir = f"/tmp/output_{generator.randint(100, 999)}"
+        index = generator.randint(1, 9)
+        delta_x = generator.randint(10, 90)
+        delta_y = generator.randint(10, 90)
+        zoom_level = generator.randint(1, 14)
+        distance_threshold = generator.randint(5, 40)
+        temp_suffix = generator.randint(10_000, 99_999)
+        fake_haversine = lambda *args: 0.0
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=connection, create=True) as connect_mock,
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda path: path == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            self.module.calculate_distance(
+                points_filepath,
+                osm_filepath,
+                saving_filedir,
+                index,
+                delta_x,
+                delta_y,
+                zoom_level=zoom_level,
+                distance_threshold=distance_threshold,
+                func=fake_haversine,
+            )
+
+        connect_mock.assert_called_once_with(f"temp_{temp_suffix}.db")
+        self.assertEqual(connection.execute_calls[0], "install spatial; load spatial;")
+        self.assertIn(points_filepath, connection.execute_calls[1])
+        self.assertIn(osm_filepath, connection.execute_calls[1])
+        self.assertIn(f"z{zoom_level}_tiles", connection.execute_calls[1])
+        self.assertIn(f"WHERE distance_meter < {distance_threshold}", connection.execute_calls[1])
+        self.assertIn(f"{saving_filedir}/osm_{index}_", connection.execute_calls[1])
+        self.assertEqual(
+            connection.create_function_calls,
+            [("haversine", fake_haversine, ["VARCHAR", "VARCHAR", "DOUBLE"], "DOUBLE")],
+        )
+        self.assertTrue(connection.closed)
+        remove_mock.assert_called_once_with(f"temp_{temp_suffix}.db")
+
+    def test_calculate_distance_still_closes_and_removes_temp_db_when_query_fails(self):
+        generator = random.Random(702)
+
+        class FailingConnection:
+            def __init__(self):
+                self.execute_calls = []
+                self.closed = False
+
+            def execute(self, query):
+                self.execute_calls.append(query)
+                if len(self.execute_calls) == 2:
+                    raise RuntimeError("boom")
+
+            def create_function(self, *args):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        connection = FailingConnection()
+        temp_suffix = generator.randint(10_000, 99_999)
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=connection, create=True),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda path: path == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            self.module.calculate_distance(
+                f"/tmp/points_{generator.randint(100, 999)}.parquet",
+                f"/tmp/osm_{generator.randint(100, 999)}.parquet",
+                f"/tmp/output_{generator.randint(100, 999)}",
+                generator.randint(1, 9),
+                generator.randint(10, 90),
+                generator.randint(10, 90),
+            )
+
+        self.assertEqual(len(connection.execute_calls), 2)
+        self.assertTrue(connection.closed)
+        remove_mock.assert_called_once_with(f"temp_{temp_suffix}.db")

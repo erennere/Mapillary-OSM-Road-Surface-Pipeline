@@ -11,32 +11,35 @@ Current verified coverage:
 - `research_code/get_nearest_osm_segments.py`
   - `create_mask`
   - `extract_first`
+  - `process_one_file` query assembly, DuckDB function registration, cleanup/error handling
 - `research_code/statistics_geographic_layers.py`
   - runtime config defaulting
   - selected SQL fragment builders
   - metric catalog assembly
   - z14 tile parsing
+- `research_code/find_osm_segments.py`
+  - `haversine`
+  - `calculate_distance` query assembly, DuckDB function registration, cleanup/error handling
 
 Ranked coverage backlog (high → low):
 
-1. `research_code/find_osm_segments.py`
-   - `haversine`
-   - distance symmetry, zero-distance, random coordinate pairs
-2. `research_code/metadata_intersections_and_filtering.py`
-   - `filtering_simple`
-   - `filtering_RDP`
-   - `finding_tiles_for_points`
-   - `finding_tiles_list_for_urban_areas`
-3. `research_code/statistics_geographic_layers.py`
-   - `haversine`
-   - `calculate_length`
-   - `create_tile`
-   - remaining SQL builder helpers
-4. `research_code/get_nearest_osm_segments.py`
-   - randomized threshold edge cases for `create_mask`
+1. `research_code/statistics_geographic_layers.py`
+   - `urban_query`
+   - `process_file`
+   - broader query-assembly validation with seeded-random parameters
+2. `research_code/find_osm_segments.py`
+   - `main`
+   - path selection, updated-after skipping, and dispatch behavior
+3. `research_code/get_nearest_osm_segments.py`
+   - `main`
+   - path selection, updated-after skipping, and dispatch behavior
+4. `research_code/metadata_intersections_and_filtering.py`
+   - integration-style helpers:
+     - `download_overture_maps`
+     - `intersection`
+     - `intersections_with_metadata`
 5. Integration-heavy modules still mostly uncovered:
    - `csv_to_parquet.py`
-   - `find_osm_segments.py::calculate_distance`
    - `highways_sort.py`
    - `dlr.py`
    - `get_linestrings_from_tiles.py`

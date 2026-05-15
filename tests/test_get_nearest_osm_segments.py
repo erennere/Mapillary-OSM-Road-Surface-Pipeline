@@ -94,3 +94,99 @@ class GetNearestOsmSegmentsTests(unittest.TestCase):
             self.module.create_mask([], threshold_up=generator.randint(1, 20)),
             [],
         )
+
+    def test_process_one_file_registers_functions_and_builds_seeded_random_query(self):
+        generator = random.Random(303)
+
+        class RecordingConnection:
+            def __init__(self):
+                self.execute_calls = []
+                self.create_function_calls = []
+                self.closed = False
+
+            def execute(self, query):
+                self.execute_calls.append(query)
+
+            def create_function(self, *args):
+                self.create_function_calls.append(args)
+
+            def close(self):
+                self.closed = True
+
+        connection = RecordingConnection()
+        threshold1 = generator.randint(5, 15)
+        threshold2 = threshold1 + generator.randint(5, 15)
+        filename = f"metadata_{generator.randint(100, 999)}.parquet"
+        input_dir = f"/tmp/intersections_{generator.randint(100, 999)}"
+        output_dir = f"/tmp/nearest_{generator.randint(100, 999)}"
+        temp_suffix = generator.randint(10_000, 99_999)
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=connection, create=True) as connect_mock,
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda path: path == f"temp_file_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            self.module.process_one_file(
+                input_dir,
+                filename,
+                output_dir,
+                threshold1=threshold1,
+                threshold2=threshold2,
+            )
+
+        connect_mock.assert_called_once_with(f"temp_file_{temp_suffix}.db")
+        self.assertEqual(
+            [call[0] for call in connection.create_function_calls],
+            [
+                "extract_timestamp",
+                "extract_attribute",
+                "extract_distance",
+                "extract_line",
+                "create_mask",
+            ],
+        )
+        self.assertIn(f"read_parquet('{input_dir}/*_{filename}')", connection.execute_calls[0])
+        self.assertIn(f"create_mask(distances_meter,{threshold1},0)", connection.execute_calls[0])
+        self.assertIn(f"create_mask(distances_meter,{threshold2},{threshold1})", connection.execute_calls[0])
+        self.assertIn(f"TO '{output_dir}/closest_{filename}'", connection.execute_calls[0])
+        self.assertTrue(connection.closed)
+        remove_mock.assert_called_once_with(f"temp_file_{temp_suffix}.db")
+
+    def test_process_one_file_cleans_up_temp_db_when_execute_raises(self):
+        generator = random.Random(304)
+
+        class FailingConnection:
+            def __init__(self):
+                self.closed = False
+                self.create_function_calls = []
+
+            def execute(self, query):
+                raise RuntimeError("boom")
+
+            def create_function(self, *args):
+                self.create_function_calls.append(args)
+
+            def close(self):
+                self.closed = True
+
+        connection = FailingConnection()
+        temp_suffix = generator.randint(10_000, 99_999)
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=connection, create=True),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda path: path == f"temp_file_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            self.module.process_one_file(
+                f"/tmp/intersections_{generator.randint(100, 999)}",
+                f"metadata_{generator.randint(100, 999)}.parquet",
+                f"/tmp/nearest_{generator.randint(100, 999)}",
+                threshold1=generator.randint(5, 15),
+                threshold2=generator.randint(16, 30),
+            )
+
+        self.assertEqual(len(connection.create_function_calls), 5)
+        self.assertTrue(connection.closed)
+        remove_mock.assert_called_once_with(f"temp_file_{temp_suffix}.db")
