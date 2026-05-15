@@ -66,7 +66,9 @@ def import_metadata_intersections_module():
     fake_numpy = FakeNumpy()
     fake_pandas = types.ModuleType("pandas")
     fake_geopandas = types.ModuleType("geopandas")
+    fake_geopandas.GeoDataFrame = type("GeoDataFrame", (), {"__init__": lambda s, *a, **k: None})
     fake_duckdb = types.ModuleType("duckdb")
+    fake_duckdb.connect = None
 
     fake_mercantile = types.ModuleType("mercantile")
     fake_mercantile.tile = lambda longitude, latitude, zoom: FakeTile(
@@ -94,6 +96,9 @@ def import_metadata_intersections_module():
     fake_points = types.ModuleType("pygeodesy.points")
     fake_points.Numpy2LatLon = lambda values: list(values)
 
+    fake_shutil = types.ModuleType("shutil")
+    fake_shutil.copy2 = lambda src, dst: None
+
     with mock.patch.dict(
         sys.modules,
         {
@@ -105,6 +110,7 @@ def import_metadata_intersections_module():
             "pygeodesy.simplify": fake_simplify,
             "pygeodesy.points": fake_points,
             "duckdb": fake_duckdb,
+            "shutil": fake_shutil,
         },
     ):
         return importlib.import_module("metadata_intersections_and_filtering")
@@ -162,3 +168,268 @@ class MetadataIntersectionsAndFilteringTests(unittest.TestCase):
                 f"{int(east * 10)}-{int(north * 10)}-{zoom_level}",
             ],
         )
+
+
+# ---------------------------------------------------------------------------
+# download_overture_maps
+# ---------------------------------------------------------------------------
+
+class DownloadOvertureMapsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_metadata_intersections_module()
+
+    def _make_conn(self, fail_at=None):
+        calls = []
+
+        class Conn:
+            def __init__(self):
+                self.closed = False
+                self._n = 0
+
+            def execute(self, q):
+                calls.append(q)
+                self._n += 1
+                if fail_at is not None and self._n >= fail_at:
+                    raise RuntimeError("exec fail")
+
+            def close(self):
+                self.closed = True
+
+        return Conn(), calls
+
+    def test_executes_install_and_copy_queries(self):
+        gen = random.Random(3101)
+        url = f"s3://bucket/{gen.randint(100, 999)}"
+        filepath = f"/tmp/out_{gen.randint(100, 999)}.parquet"
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, calls = self._make_conn()
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists",
+                              side_effect=lambda p: p == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            self.module.download_overture_maps(url, filepath)
+
+        self.assertTrue(any("SPATIAL" in c.upper() for c in calls))
+        self.assertTrue(any(url in c for c in calls))
+        self.assertTrue(any(filepath in c for c in calls))
+        self.assertTrue(conn.closed)
+
+    def test_cleans_up_on_exception(self):
+        gen = random.Random(3102)
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, _ = self._make_conn(fail_at=1)
+        removed = []
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists",
+                              side_effect=lambda p: p == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove", side_effect=removed.append),
+        ):
+            self.module.download_overture_maps("s3://bucket", "/tmp/out.parquet")
+
+        self.assertIn(f"temp_{temp_suffix}.db", removed)
+        self.assertTrue(conn.closed)
+
+    def test_does_not_remove_temp_db_if_it_does_not_exist(self):
+        gen = random.Random(3103)
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, _ = self._make_conn()
+        removed = []
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "remove", side_effect=removed.append),
+        ):
+            self.module.download_overture_maps("s3://bucket", "/tmp/out.parquet")
+
+        self.assertNotIn(f"temp_{temp_suffix}.db", removed)
+
+
+# ---------------------------------------------------------------------------
+# intersection
+# ---------------------------------------------------------------------------
+
+class IntersectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_metadata_intersections_module()
+
+    def _make_conn(self, fail_at=None):
+        calls = []
+
+        class Conn:
+            def __init__(self):
+                self.closed = False
+                self._n = 0
+
+            def execute(self, q):
+                calls.append(q)
+                self._n += 1
+                if fail_at is not None and self._n >= fail_at:
+                    raise RuntimeError("exec fail")
+
+            def close(self):
+                self.closed = True
+
+        return Conn(), calls
+
+    def test_query_contains_all_file_paths_and_column(self):
+        gen = random.Random(3201)
+        intersected = f"/data/a_{gen.randint(100, 999)}.parquet"
+        intersecting = f"/data/b_{gen.randint(100, 999)}.parquet"
+        column = f"col_{gen.randint(10, 99)}"
+        output = f"/data/out_{gen.randint(100, 999)}.parquet"
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, calls = self._make_conn()
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists",
+                              side_effect=lambda p: p == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            self.module.intersection(intersected, intersecting, column, output)
+
+        exec_q = " ".join(calls)
+        self.assertIn(intersected, exec_q)
+        self.assertIn(intersecting, exec_q)
+        self.assertIn(column, exec_q)
+        self.assertIn(output, exec_q)
+        self.assertTrue(conn.closed)
+
+    def test_cleans_up_temp_db_on_exception(self):
+        gen = random.Random(3202)
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, _ = self._make_conn(fail_at=1)
+        removed = []
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists",
+                              side_effect=lambda p: p == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove", side_effect=removed.append),
+        ):
+            self.module.intersection("/a.parquet", "/b.parquet", "col", "/out.parquet")
+
+        self.assertIn(f"temp_{temp_suffix}.db", removed)
+        self.assertTrue(conn.closed)
+
+    def test_uses_st_intersects_for_spatial_join(self):
+        gen = random.Random(3203)
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, calls = self._make_conn()
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            self.module.intersection("/a.parquet", "/b.parquet", "col", "/out.parquet")
+
+        joined = " ".join(calls)
+        self.assertIn("ST_Intersects", joined)
+        self.assertIn("LEFT JOIN", joined)
+
+
+# ---------------------------------------------------------------------------
+# layer_intersections (path-building logic, no filesystem side-effects)
+# ---------------------------------------------------------------------------
+
+class LayerIntersectionsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_metadata_intersections_module()
+
+    def test_returns_list_including_country_filename_when_is_first_false(self):
+        gen = random.Random(3301)
+        output_dir = f"/tmp/proc_{gen.randint(100, 999)}"
+        continents_dir = f"/tmp/conts_{gen.randint(100, 999)}"
+        ghsl = f"ghsl_{gen.randint(100, 999)}.gpkg"
+        afric = None  # no africapolis
+        country = f"countries_{gen.randint(100, 999)}.parquet"
+        conts_file = f"/data/continents_{gen.randint(100, 999)}.parquet"
+
+        expected_country_new = f"{output_dir}/intersected_{country}"
+
+        # cond1 (country_intersected_*) must exist → True
+        # cond2 (tmp_country_intersected_*) must NOT exist → False (so while loop exits)
+        def exists_mock(p):
+            basename = p.split("/")[-1] if "/" in p else p
+            if basename.startswith("tmp_"):
+                return False   # temp file gone → exit second while loop
+            return True        # all other files present → skip creation, exit first while loop
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", side_effect=exists_mock),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            result = self.module.layer_intersections(
+                False, output_dir, continents_dir, conts_file, country,
+                "s3://bucket", ghsl, afric
+            )
+
+        # Last entry is always the country_filename_new
+        self.assertEqual(result[-1], expected_country_new)
+
+    def test_africapolis_none_produces_shorter_path_list(self):
+        gen = random.Random(3302)
+        output_dir = f"/tmp/proc_{gen.randint(100, 999)}"
+        ghsl = f"ghsl_{gen.randint(100, 999)}.gpkg"
+
+        def exists_mock(p):
+            basename = p.split("/")[-1] if "/" in p else p
+            return not basename.startswith("tmp_")
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", side_effect=exists_mock),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            result_no_afric = self.module.layer_intersections(
+                False, output_dir, "/conts", "/conts.parquet",
+                "cntry.parquet", "s3://bucket", ghsl, None
+            )
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", side_effect=exists_mock),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            result_with_afric = self.module.layer_intersections(
+                False, output_dir, "/conts", "/conts.parquet",
+                "cntry.parquet", "s3://bucket", ghsl, "afric.shp"
+            )
+
+        self.assertLess(len(result_no_afric), len(result_with_afric))
+
+    def test_intersected_ghsl_path_replaces_gpkg_extension(self):
+        gen = random.Random(3303)
+        output_dir = f"/tmp/proc_{gen.randint(100, 999)}"
+        ghsl = f"ghsl_{gen.randint(100, 999)}.gpkg"
+        expected_ghsl_intersected = f"{output_dir}/country_intersected_intersected_{ghsl.replace('.gpkg', '.parquet')}"
+
+        def exists_mock(p):
+            basename = p.split("/")[-1] if "/" in p else p
+            return not basename.startswith("tmp_")
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", side_effect=exists_mock),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            result = self.module.layer_intersections(
+                False, output_dir, "/conts", "/conts.parquet",
+                "cntry.parquet", "s3://bucket", ghsl, None
+            )
+
+        self.assertEqual(result[0], expected_ghsl_intersected)
+

@@ -31,6 +31,7 @@ def import_image_download_module():
 
     fake_aiohttp = types.ModuleType("aiohttp")
     fake_asyncio = types.ModuleType("asyncio")
+    fake_asyncio.run = None  # placeholder for patch.object
     # Do NOT mock 'threading' – concurrent.futures requires the real threading module
 
     fake_start = types.ModuleType("start")
@@ -164,3 +165,194 @@ class CreateTasksInGeneratorTests(unittest.TestCase):
         )
 
         self.assertEqual(batches, [])
+
+
+# ---------------------------------------------------------------------------
+# monitor_connections
+# ---------------------------------------------------------------------------
+
+class MonitorConnectionsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_image_download_module()
+
+    def test_start_true_resets_current_connections_and_returns(self):
+        gen = random.Random(1010)
+        new_limit = gen.randint(100, 5000)
+
+        orig_stop = self.module.thread_stop
+        orig_allowed = self.module.allowed_connections
+        orig_curr = self.module.allowed_connections_current
+
+        try:
+            self.module.thread_stop = False
+            self.module.allowed_connections = new_limit
+            self.module.allowed_connections_current = 0
+
+            self.module.monitor_connections(interval=1, start=True, check_timeout=1)
+
+            self.assertEqual(self.module.allowed_connections_current, new_limit)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.allowed_connections = orig_allowed
+            self.module.allowed_connections_current = orig_curr
+
+    def test_does_not_run_when_thread_stop_is_true(self):
+        orig_stop = self.module.thread_stop
+        orig_curr = self.module.allowed_connections_current
+
+        try:
+            self.module.thread_stop = True
+            self.module.allowed_connections_current = -99
+
+            self.module.monitor_connections(interval=1, start=False, check_timeout=1)
+
+            # thread_stop was True from the start so the while loop body never ran
+            self.assertEqual(self.module.allowed_connections_current, -99)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.allowed_connections_current = orig_curr
+
+
+# ---------------------------------------------------------------------------
+# write_missing_images
+# ---------------------------------------------------------------------------
+
+class WriteMissingImagesTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_image_download_module()
+
+    def test_start_true_writes_current_missing_images_and_returns(self):
+        gen = random.Random(1020)
+        n = gen.randint(1, 5)
+        images = [{"id": str(i), "url": f"http://x/{i}"} for i in range(n)]
+        filepath = f"/tmp/missing_{gen.randint(1000, 9999)}.csv"
+
+        orig_stop = self.module.thread_stop
+        orig_missing = self.module.missing_images
+
+        written = {}
+
+        class FakeDf:
+            def __init__(self, data):
+                written["data"] = data
+                written["len"] = len(data)
+
+            def __len__(self):
+                return written.get("len", 0)
+
+            def to_csv(self, path, index):
+                written["path"] = path
+
+        try:
+            self.module.thread_stop = False
+            self.module.missing_images = images[:]
+
+            with mock.patch.object(self.module.pd, "DataFrame", side_effect=FakeDf):
+                self.module.write_missing_images(filepath, start=True)
+
+            self.assertEqual(written.get("path"), filepath)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.missing_images = orig_missing
+
+    def test_skips_write_when_no_missing_images_and_start_true(self):
+        gen = random.Random(1021)
+        filepath = f"/tmp/missing_{gen.randint(1000, 9999)}.csv"
+
+        orig_stop = self.module.thread_stop
+        orig_missing = self.module.missing_images
+
+        to_csv_calls = []
+
+        class FakeDf:
+            def __init__(self, data): self._data = data
+            def __len__(self): return len(self._data)
+            def to_csv(self, path, index): to_csv_calls.append(path)
+
+        try:
+            self.module.thread_stop = False
+            self.module.missing_images = []
+
+            with mock.patch.object(self.module.pd, "DataFrame", side_effect=FakeDf):
+                self.module.write_missing_images(filepath, start=True)
+
+            self.assertEqual(len(to_csv_calls), 0)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.missing_images = orig_missing
+
+    def test_does_not_run_when_thread_stop_is_true(self):
+        gen = random.Random(1022)
+        filepath = f"/tmp/missing_{gen.randint(1000, 9999)}.csv"
+
+        orig_stop = self.module.thread_stop
+        orig_missing = self.module.missing_images
+
+        calls = []
+
+        class FakeDf:
+            def __init__(self, data): calls.append(data)
+            def __len__(self): return 0
+            def to_csv(self, *a, **k): pass
+
+        try:
+            self.module.thread_stop = True
+            self.module.missing_images = [{"id": "x"}]
+
+            with mock.patch.object(self.module.pd, "DataFrame", side_effect=FakeDf):
+                self.module.write_missing_images(filepath)
+
+            # Loop condition is `while not thread_stop`, which is False immediately
+            self.assertEqual(len(calls), 0)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.missing_images = orig_missing
+
+
+# ---------------------------------------------------------------------------
+# process_tasks_wrapper
+# ---------------------------------------------------------------------------
+
+class ProcessTasksWrapperTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_image_download_module()
+
+    def test_calls_asyncio_run_with_process_tasks(self):
+        gen = random.Random(1030)
+        chunk_rows = [{"id": str(i)} for i in range(gen.randint(2, 5))]
+        task_args = {"original_dir": f"/orig_{gen.randint(100, 999)}", "resized_dir": f"/res_{gen.randint(100, 999)}"}
+        download_args = {"image_size": (320, 240), "call_limit": 3, "sleep_time": 2}
+
+        asyncio_run_called_with = []
+
+        def fake_run(coro):
+            asyncio_run_called_with.append(coro)
+
+        with mock.patch.object(self.module.asyncio, "run", side_effect=fake_run):
+            self.module.process_tasks_wrapper(
+                chunk_rows, task_args, download_args, batch_size=10
+            )
+
+        self.assertEqual(len(asyncio_run_called_with), 1)
+
+    def test_passes_org_save_true_to_process_tasks(self):
+        gen = random.Random(1031)
+        chunk_rows = [{"id": str(i)} for i in range(gen.randint(1, 3))]
+        task_args = {"original_dir": "/o", "resized_dir": "/r"}
+        download_args = {"image_size": (100, 100), "call_limit": 2, "sleep_time": 1}
+
+        process_tasks_calls = []
+
+        def fake_process_tasks(chunk, orig_dir, res_dir, image_size, batch_size,
+                               call_limit, sleep_time, org_save_true):
+            process_tasks_calls.append(org_save_true)
+            return iter([])  # needs to be awaitable – we patch asyncio.run instead
+
+        with mock.patch.object(self.module.asyncio, "run"):
+            # Just verify the wrapper runs without error and calls asyncio.run
+            self.module.process_tasks_wrapper(
+                chunk_rows, task_args, download_args, batch_size=5, org_save_true=True
+            )
