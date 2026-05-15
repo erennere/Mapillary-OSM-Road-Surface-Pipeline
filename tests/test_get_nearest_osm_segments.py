@@ -1,4 +1,5 @@
 import importlib
+import random
 import sys
 import types
 import unittest
@@ -69,3 +70,27 @@ class GetNearestOsmSegmentsTests(unittest.TestCase):
     def test_extract_first_wraps_only_the_first_value(self):
         self.assertEqual(self.module.extract_first(["first", "second", "third"]), ["first"])
 
+    def test_create_mask_matches_python_reference_for_seeded_random_cases(self):
+        generator = random.Random(301)
+
+        for _ in range(20):
+            threshold_down = generator.randint(-10, 10)
+            threshold_up = threshold_down + generator.randint(1, 20)
+            values = [generator.randint(-20, 30) for _ in range(generator.randint(1, 8))]
+
+            observed = self.module.create_mask(
+                values,
+                threshold_up=threshold_up,
+                threshold_down=threshold_down,
+            )
+            expected = [threshold_down < value < threshold_up for value in values]
+
+            self.assertEqual(observed, expected)
+
+    def test_create_mask_returns_empty_list_for_seeded_empty_input(self):
+        generator = random.Random(302)
+
+        self.assertEqual(
+            self.module.create_mask([], threshold_up=generator.randint(1, 20)),
+            [],
+        )
