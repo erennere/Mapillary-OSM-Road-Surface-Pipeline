@@ -339,3 +339,189 @@ class StatisticsGeographicLayersTests(unittest.TestCase):
             expected += 6371008 * (2 * math.asin(math.sqrt(a)))
 
         self.assertEqual(observed, round(expected, 3))
+
+    def test_urban_query_embeds_seeded_random_parameters_and_aliases(self):
+        generator = random.Random(606)
+        col = f"layer_{generator.randint(10, 99)}"
+        sigma = round(generator.uniform(0.2, 1.4), 3)
+        score = round(generator.uniform(0.5, 0.99), 3)
+        threshold = round(generator.uniform(0.1, 0.4), 3)
+        osm_distance = generator.randint(5, 25)
+        pred_distance = generator.randint(5, 20)
+        output_filepath = f"/tmp/urban_{generator.randint(100, 999)}.parquet"
+
+        with mock.patch.multiple(
+            self.module,
+            road_classes={"sample": ["tag_a", "tag_b"]},
+            paved_tags=["sample_paved"],
+            id_tags=["sample_id"],
+            length_tags=["sample_length"],
+        ):
+            query = self.module.urban_query(
+                col,
+                sigma,
+                score,
+                threshold,
+                osm_distance,
+                pred_distance,
+                output_filepath,
+            )
+
+        self.assertIn(f"TO '{output_filepath}'", query)
+        self.assertIn(f"{col}, ANY_VALUE(osm_id) as osm_id", query)
+        self.assertIn(f"zs_pred_score < {sigma}", query)
+        self.assertIn(f"pred_score >= {score}", query)
+        self.assertIn(f"AND distance_meter < {pred_distance}", query)
+        self.assertIn(f"WHERE distance_meter < {osm_distance} and osm_id IS NOT NULL", query)
+        self.assertIn(f"LIST(DISTINCT CASE WHEN distance_meter <= {osm_distance} THEN osm_id END) AS osm_ids", query)
+        self.assertIn(f"LEFT JOIN pred_stats b ON CAST(a.{col} as INT) = CAST(b.{col} as INT)", query)
+        self.assertIn("osm_tags_highway IN ('tag_a', 'tag_b')", query)
+        self.assertIn("b.sample_paved", query)
+        self.assertIn("b.sample_id as pred_sample_id", query)
+        self.assertIn("c.sample_length as osm_sample_length", query)
+        self.assertIn("d.sample_length", query)
+
+    def test_process_file_executes_seeded_random_query_pipeline_and_cleans_up(self):
+        generator = random.Random(607)
+
+        class FakeResult:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def df(self):
+                return self.payload
+
+        class RecordingConnection:
+            def __init__(self):
+                self.execute_calls = []
+                self.create_function_calls = []
+                self.closed = False
+
+            def execute(self, query):
+                self.execute_calls.append(query)
+                return FakeResult({"query": query})
+
+            def create_function(self, *args):
+                self.create_function_calls.append(args)
+
+            def close(self):
+                self.closed = True
+
+        connection = RecordingConnection()
+        tile = generator.randint(10, 99)
+        sigma = round(generator.uniform(0.2, 1.4), 3)
+        score = round(generator.uniform(0.5, 0.99), 3)
+        threshold = round(generator.uniform(0.1, 0.4), 3)
+        osm_distance = generator.randint(5, 25)
+        pred_distance = generator.randint(5, 20)
+        filedir = f"/tmp/inputs/tile={tile}"
+        results_dir = f"/tmp/results_{generator.randint(100, 999)}"
+        osm_filedir = f"/tmp/osm_{generator.randint(100, 999)}"
+        data_input_filepath = f"/tmp/data_{generator.randint(100, 999)}.parquet"
+        cols = [f"col_{generator.randint(1, 50)}", f"col_{generator.randint(51, 99)}"]
+        urban_areas = [f"urban_{generator.randint(1, 9)}", f"urban_{generator.randint(10, 19)}"]
+        temp_suffix = generator.randint(10_000, 99_999)
+
+        def fake_exists(path):
+            return path == f"temp_{temp_suffix}.db"
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=connection, create=True) as connect_mock,
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os, "chdir") as chdir_mock,
+            mock.patch.object(self.module.os, "makedirs") as makedirs_mock,
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+            mock.patch.object(
+                self.module,
+                "urban_query",
+                side_effect=[
+                    f"URBAN_QUERY::{cols[0]}",
+                    f"URBAN_QUERY::{cols[1]}",
+                ],
+            ) as urban_query_mock,
+        ):
+            self.module.process_file(
+                filedir,
+                sigma,
+                score,
+                threshold,
+                results_dir,
+                osm_distance,
+                pred_distance,
+                osm_filedir,
+                data_input_filepath,
+                cols,
+                urban_areas,
+            )
+
+        connect_mock.assert_called_once_with(f"temp_{temp_suffix}.db")
+        chdir_mock.assert_called_once_with(filedir)
+        self.assertEqual(connection.execute_calls[0], "INSTALL spatial; LOAD spatial;")
+        self.assertEqual(
+            [call[0] for call in connection.create_function_calls],
+            ["create_tile", "calculate_length", "correct_z14_tiles_osm"],
+        )
+        self.assertIn(data_input_filepath, connection.execute_calls[1])
+        self.assertIn(f"{osm_filedir}/tile={tile}/*.parquet", connection.execute_calls[3])
+        self.assertIn(f"WHERE {self.module.zoom_level}_tiles = {tile}", connection.execute_calls[3])
+        self.assertIn(f"{results_dir}/{self.module.zoom_level}_tiles/{self.module.zoom_level}_tiles_with_stats_{tile}.parquet", connection.execute_calls[5])
+        self.assertIn(f"{results_dir}/world/world_with_stats_{tile}.parquet", connection.execute_calls[9])
+        self.assertEqual(connection.execute_calls[-2:], [f"URBAN_QUERY::{cols[0]}", f"URBAN_QUERY::{cols[1]}"])
+        self.assertEqual(urban_query_mock.call_count, 2)
+        self.assertTrue(connection.closed)
+        remove_mock.assert_called_once_with(f"temp_{temp_suffix}.db")
+        self.assertGreaterEqual(makedirs_mock.call_count, 8)
+
+    def test_process_file_closes_and_removes_temp_db_when_query_execution_fails(self):
+        generator = random.Random(608)
+
+        class FailingConnection:
+            def __init__(self):
+                self.execute_calls = []
+                self.closed = False
+
+            def execute(self, query):
+                self.execute_calls.append(query)
+                if len(self.execute_calls) == 2:
+                    raise RuntimeError("boom")
+                return self
+
+            def df(self):
+                return {"ok": True}
+
+            def create_function(self, *args):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        connection = FailingConnection()
+        tile = generator.randint(10, 99)
+        temp_suffix = generator.randint(10_000, 99_999)
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=connection, create=True),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda path: path == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            self.module.process_file(
+                f"/tmp/inputs/tile={tile}",
+                round(generator.uniform(0.2, 1.4), 3),
+                round(generator.uniform(0.5, 0.99), 3),
+                round(generator.uniform(0.1, 0.4), 3),
+                f"/tmp/results_{generator.randint(100, 999)}",
+                generator.randint(5, 25),
+                generator.randint(5, 20),
+                f"/tmp/osm_{generator.randint(100, 999)}",
+                f"/tmp/data_{generator.randint(100, 999)}.parquet",
+                [f"col_{generator.randint(1, 50)}"],
+                [f"urban_{generator.randint(1, 9)}"],
+            )
+
+        self.assertEqual(len(connection.execute_calls), 2)
+        self.assertTrue(connection.closed)
+        remove_mock.assert_called_once_with(f"temp_{temp_suffix}.db")

@@ -17,6 +17,8 @@ Current verified coverage:
   - selected SQL fragment builders
   - metric catalog assembly
   - z14 tile parsing
+  - `urban_query` seeded-random query assembly
+  - `process_file` DuckDB workflow assembly, UDF registration, cleanup/error handling
 - `research_code/find_osm_segments.py`
   - `haversine`
   - `calculate_distance` query assembly, DuckDB function registration, cleanup/error handling
@@ -24,9 +26,8 @@ Current verified coverage:
 Ranked coverage backlog (high → low):
 
 1. `research_code/statistics_geographic_layers.py`
-   - `urban_query`
-   - `process_file`
-   - broader query-assembly validation with seeded-random parameters
+   - broader query-assembly validation for remaining large layer outputs
+   - `main`
 2. `research_code/find_osm_segments.py`
    - `main`
    - path selection, updated-after skipping, and dispatch behavior
