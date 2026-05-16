@@ -1,5 +1,6 @@
 """Tests for highways_sort.py – filter_and_copy_file, process_single_tile, process_file."""
 import importlib
+import os
 import random
 import sys
 import types
@@ -324,7 +325,7 @@ class ProcessFileTests(unittest.TestCase):
         args = self._args(gen, is_first=False)
         filename = args[0]
         ohsome_dir = args[2]
-        expected_path = f"{ohsome_dir}/{filename}"
+        expected_path = os.path.join(ohsome_dir, filename)
 
         captured = []
 

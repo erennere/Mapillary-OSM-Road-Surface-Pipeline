@@ -1,4 +1,5 @@
 import importlib
+import os
 import random
 import sys
 import types
@@ -149,13 +150,13 @@ class ProcessSingleTileTests(unittest.TestCase):
         def fake_read_csv(path, usecols=None):
             return FakeOldMetadata(old_sequences)
 
-        unfiltered_path = f"{data_dir}/metadata_unfiltered_{tile}.csv"
+        unfiltered_path = os.path.join(data_dir, f"metadata_unfiltered_{tile}.csv")
 
         with (
             mock.patch.object(
                 self.module.os.path,
                 "exists",
-                side_effect=lambda p: p == unfiltered_path,
+                side_effect=lambda p: os.path.normpath(p) == os.path.normpath(unfiltered_path),
             ),
             mock.patch.object(self.module.pd, "read_csv", side_effect=fake_read_csv),
             mock.patch.object(self.module, "get_metadata", side_effect=fake_get_metadata),
@@ -174,7 +175,7 @@ class ProcessSingleTileTests(unittest.TestCase):
         metadata_args = {}
 
         gdf = self._make_gdf(tile, sequences, tiles_col)
-        unfiltered_path = f"{data_dir}/metadata_unfiltered_{tile}.csv"
+        unfiltered_path = os.path.join(data_dir, f"metadata_unfiltered_{tile}.csv")
 
         def fake_read_csv(path, usecols=None):
             return FakeOldMetadata(sequences)
@@ -185,7 +186,7 @@ class ProcessSingleTileTests(unittest.TestCase):
             mock.patch.object(
                 self.module.os.path,
                 "exists",
-                side_effect=lambda p: p == unfiltered_path,
+                side_effect=lambda p: os.path.normpath(p) == os.path.normpath(unfiltered_path),
             ),
             mock.patch.object(self.module.pd, "read_csv", side_effect=fake_read_csv),
             mock.patch.object(
@@ -207,13 +208,13 @@ class ProcessSingleTileTests(unittest.TestCase):
         metadata_args = {}
 
         gdf = self._make_gdf(tile, sequences, tiles_col)
-        missing_path = f"{data_dir}/missing_sequences_{tile}.csv"
+        missing_path = os.path.join(data_dir, f"missing_sequences_{tile}.csv")
 
         with (
             mock.patch.object(
                 self.module.os.path,
                 "exists",
-                side_effect=lambda p: p == missing_path,
+                side_effect=lambda p: os.path.normpath(p) == os.path.normpath(missing_path),
             ),
             mock.patch.object(self.module.os, "remove") as remove_mock,
             mock.patch.object(self.module, "get_metadata"),
@@ -250,7 +251,7 @@ class ProcessSingleTileTests(unittest.TestCase):
         ):
             self.module.process_single_tile(tile, gdf, tiles_col, data_dir, metadata_args)
 
-        self.assertEqual(captured["missing"], expected_missing)
-        self.assertEqual(captured["meta"], expected_meta)
+        self.assertEqual(os.path.normpath(captured["missing"]), os.path.normpath(expected_missing))
+        self.assertEqual(os.path.normpath(captured["meta"]), os.path.normpath(expected_meta))
         self.assertEqual(captured["kwargs"]["mly_key"], "k")
         self.assertEqual(captured["kwargs"]["extra"], "val")

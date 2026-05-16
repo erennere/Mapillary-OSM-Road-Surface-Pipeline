@@ -21,6 +21,7 @@ def import_metadata_download_module():
 
     fake_pandas = types.ModuleType("pandas")
     fake_pandas.DataFrame = type("DataFrame", (), {"__init__": lambda s, *a, **k: None})
+    fake_pandas.concat = lambda frames, *args, **kwargs: frames[0] if frames else None
 
     fake_geopandas = types.ModuleType("geopandas")
     fake_geopandas.GeoDataFrame = type("GeoDataFrame", (), {})
