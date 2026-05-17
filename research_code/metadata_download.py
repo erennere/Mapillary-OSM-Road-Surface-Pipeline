@@ -329,16 +329,20 @@ def write_data_on_the_fly(filepath: str, flush_func: Callable, end: bool = False
         check_timeout (int): Check interval within each cycle.
     """
     global write_true
+
+    # FIX [D-1]: Honor end=True contract by flushing once even when write_true is already False.
+    if end:
+        try:
+            flush_func(filepath)
+        except Exception as e:
+            logger.error(f"Error in write_data_on_the_fly: {e}")
+        return
     
     while write_true:
         try:
             flush_func(filepath)
         except Exception as e:
             logger.error(f"Error in write_data_on_the_fly: {e}")
-        
-        if end:
-            logger.debug(f"Write-on-the-fly ending (end=True)")
-            break
         
         for _ in range(math.ceil(interval / (check_timeout + 0.1))):
             if not write_true:
@@ -348,6 +352,27 @@ def write_data_on_the_fly(filepath: str, flush_func: Callable, end: bool = False
                     logger.error(f"Error in final flush: {e}")
                 return
             time.sleep(check_timeout)
+
+
+def join_threads_with_timeout(threads: List[threading.Thread], timeout: int = 30) -> None:
+    """
+    Join all provided threads and raise if any thread remains alive.
+
+    Args:
+        threads (list): Threads to join.
+        timeout (int): Per-thread join timeout in seconds.
+    """
+    for thread in threads:
+        thread.join(timeout=timeout)
+
+    alive_threads = [
+        thread for thread in threads
+        if hasattr(thread, "is_alive") and callable(thread.is_alive) and thread.is_alive()
+    ]
+
+    if alive_threads:
+        names = [getattr(thread, "name", repr(thread)) for thread in alive_threads]
+        raise RuntimeError(f"Failed to stop background threads: {names}")
 
 
 # ============================================================================
@@ -447,6 +472,12 @@ async def data_handling(session: aiohttp.ClientSession, url: str, attempt: int, 
     if json_data is None:
         attempt += 1
         logger.debug(f"No data, attempt {attempt}, delaying {delay_between_requests}s")
+        await asyncio.sleep(delay_between_requests)
+        return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests
+
+    if not isinstance(json_data, dict):
+        logger.warning(f"Unexpected JSON payload type from {url}: {type(json_data).__name__}")
+        attempt += 1
         await asyncio.sleep(delay_between_requests)
         return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests
     
@@ -577,7 +608,15 @@ async def process_one_sequence(session: aiohttp.ClientSession, sequence: str, ml
         lambda x: x.get('coordinates')[1] if isinstance(x, dict) else np.nan
     )
     
-    for col in columns:
+    # FIX [C-1]: Keep a stable output schema independent of caller-provided columns.
+    expected_output_columns = [
+        'sequence', 'id', 'url', 'long', 'lat', 'geometry',
+        'height', 'width', 'altitude', 'make', 'model',
+        'creator', 'is_pano', 'timestamp'
+    ]
+
+    # FIX [C-1]: Fill all required output columns to avoid KeyError on final projection.
+    for col in expected_output_columns:
         if col not in df_data.columns:
             df_data[col] = False if col == "is_pano" else np.nan
     
@@ -589,9 +628,8 @@ async def process_one_sequence(session: aiohttp.ClientSession, sequence: str, ml
         'captured_at': 'timestamp'
     }, axis=1, inplace=True)
     
-    df_data = df_data[['sequence', 'id', 'url', 'long', 'lat', 'geometry',
-                       'height', 'width', 'altitude', 'make', 'model',
-                       'creator', 'is_pano', 'timestamp']]
+    # FIX [C-1]: Project the canonical output schema consistently.
+    df_data = df_data[expected_output_columns]
     
     logger.info(f"Processed sequence {sequence}: {len(df_data)} images")
     return df_data, sequence_info
@@ -613,6 +651,7 @@ def segmented_bboxes(boundary_box: List[float], n: int) -> List[List[float]]:
         list: List of [west, south, east, north] bboxes
     """
     west, south, east, north = boundary_box
+    n = max(1, int(n))
     num_rows_cols = math.ceil(math.sqrt(n))
     boxes = []
     
@@ -782,6 +821,9 @@ def get_sequences(bbox: List[float], mly_key: str, n: int, output_dir: str, numb
         }
     
     global thread_stop, allowed_connection_current, allowed_connection, global_sequences, global_bboxes, number_of_requests
+
+    max_workers = max(1, int(max_workers))
+    max_connections = int(params.get('max_connections', 10000))
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -803,7 +845,7 @@ def get_sequences(bbox: List[float], mly_key: str, n: int, output_dir: str, numb
     write_sequences(sequence_file, interval=monitoring['write_interval'], start=True, check_timeout=monitoring['write_check_timeout'])
     write_bbox(finished_bboxes, interval=monitoring['write_interval'], start=True, check_timeout=monitoring['write_check_timeout'])
     
-    monitor_jobs(job_patterns, interval=monitoring['monitor_interval'], start=True, check_timeout=monitoring['monitor_check_timeout'], max_connections=params['max_connections'])
+    monitor_jobs(job_patterns, interval=monitoring['monitor_interval'], start=True, check_timeout=monitoring['monitor_check_timeout'], max_connections=max_connections)
     monitor_connections(interval=monitoring['monitor_interval'], start=True, check_timeout=monitoring['monitor_check_timeout'])
     
     logger.info(f"Starting sequence discovery - initial {number_of_initial_bboxes} bboxes")
@@ -813,6 +855,8 @@ def get_sequences(bbox: List[float], mly_key: str, n: int, output_dir: str, numb
         args=(sequence_file, monitoring['write_interval'], False, monitoring['write_check_timeout']), 
         daemon=True
     )
+    # FIX [G-3]: Keep explicit references for deterministic shutdown checks.
+    started_threads: List[threading.Thread] = [sequences_thread]
     sequences_thread.start()
     
     bboxes_thread = threading.Thread(
@@ -820,6 +864,7 @@ def get_sequences(bbox: List[float], mly_key: str, n: int, output_dir: str, numb
         args=(finished_bboxes, monitoring['write_interval'], False, monitoring['write_check_timeout']), 
         daemon=True
     )
+    started_threads.append(bboxes_thread)
     bboxes_thread.start()
     
     connections_thread = threading.Thread(
@@ -827,57 +872,59 @@ def get_sequences(bbox: List[float], mly_key: str, n: int, output_dir: str, numb
         args=(monitoring['monitor_interval'], False, monitoring['monitor_check_timeout']), 
         daemon=True
     )
+    started_threads.append(connections_thread)
     connections_thread.start()
     
     job_thread = threading.Thread(
         target=monitor_jobs, 
-        args=(job_patterns, monitoring['monitor_interval'], False, monitoring['monitor_check_timeout'], params['max_connections']), 
+        args=(job_patterns, monitoring['monitor_interval'], False, monitoring['monitor_check_timeout'], max_connections), 
         daemon=True
     )
+    started_threads.append(job_thread)
     job_thread.start()
     
     bboxes = segmented_bboxes(bbox, number_of_initial_bboxes)
     number_of_requests_initial = number_of_requests
     time_discovery_start = time.time()
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        list(executor.map(
-            get_bboxes_and_sequences_wrapping,
-            bboxes,
-            [n] * len(bboxes),
-            [mly_key] * len(bboxes),
-            [params] * len(bboxes),
-            [windows] * len(bboxes)
-        ))
-    
-    thread_stop = True
-    time_discovery_end = time.time()
-    
-    number_of_requests_final = number_of_requests
-    requests_for_query = number_of_requests_final - number_of_requests_initial
-    
-    if requests_for_query > 0:
-        avg_time_per_request = (time_discovery_end - time_discovery_start) / requests_for_query
-    else:
-        avg_time_per_request = 0
-    
-    logger.info(f"Sequence discovery completed: {len(global_sequences)} sequences in {round(time_discovery_end-time_discovery_start, 2)}s")
-    logger.info(f"Requests: {requests_for_query} in {round(time_discovery_end-time_discovery_start, 2)}s (avg {round(avg_time_per_request, 2)}s/req)")
-    
-    global_sequences_df = pd.DataFrame({'sequences': list(global_sequences)})
-    global_sequences_df.to_csv(sequence_file, index=False)
-    
-    bboxes_gdf = create_geodataframe_from_bboxes(list(global_bboxes))
-    if len(bboxes_gdf):
-        bboxes_gdf.to_file(finished_bboxes, driver='GPKG', index=False)
-    
-    sequences_thread.join(timeout=30)
-    bboxes_thread.join(timeout=30)
-    connections_thread.join(timeout=30)
-    job_thread.join(timeout=30)
-    
-    logger.info("Sequence discovery threads stopped")
-    return list(global_bboxes), list(global_sequences)
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            list(executor.map(
+                get_bboxes_and_sequences_wrapping,
+                bboxes,
+                [n] * len(bboxes),
+                [mly_key] * len(bboxes),
+                [params] * len(bboxes),
+                [windows] * len(bboxes)
+            ))
+
+        time_discovery_end = time.time()
+
+        number_of_requests_final = number_of_requests
+        requests_for_query = number_of_requests_final - number_of_requests_initial
+
+        if requests_for_query > 0:
+            avg_time_per_request = (time_discovery_end - time_discovery_start) / requests_for_query
+        else:
+            avg_time_per_request = 0
+
+        logger.info(f"Sequence discovery completed: {len(global_sequences)} sequences in {round(time_discovery_end-time_discovery_start, 2)}s")
+        logger.info(f"Requests: {requests_for_query} in {round(time_discovery_end-time_discovery_start, 2)}s (avg {round(avg_time_per_request, 2)}s/req)")
+
+        global_sequences_df = pd.DataFrame({'sequences': list(global_sequences)})
+        global_sequences_df.to_csv(sequence_file, index=False)
+
+        bboxes_gdf = create_geodataframe_from_bboxes(list(global_bboxes))
+        if len(bboxes_gdf):
+            bboxes_gdf.to_file(finished_bboxes, driver='GPKG', index=False)
+
+        return list(global_bboxes), list(global_sequences)
+    finally:
+        # FIX [G-3]: Always signal stop even when discovery workers raise.
+        thread_stop = True
+        # FIX [G-3]: Ensure all background threads are joined before returning.
+        join_threads_with_timeout(started_threads, timeout=30)
+        logger.info("Sequence discovery threads stopped")
 
 
 # ============================================================================
@@ -924,10 +971,16 @@ async def metadata_download(mly_key: str, sequences: List[str], columns: List[st
                 process_one_sequence(session, seq, mly_key, columns, args_dict)
                 for seq in batch if seq is not None
             ]
-            results = await asyncio.gather(*tasks)
-            results = [r for r in results if r is not None]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for metadata_df, missing_seq in results:
+            for result in results:
+                if result is None:
+                    continue
+                if isinstance(result, Exception):
+                    logger.warning(f"Sequence processing failed: {result}")
+                    continue
+
+                metadata_df, missing_seq = result
                 if metadata_df is not None and not metadata_df.empty:
                     with metadata_lock:
                         metadata_list.append(metadata_df)
@@ -985,8 +1038,16 @@ def get_metadata(sequence_list: List[str], missing_sequences_file: str, metadata
         }
     
     global thread_stop, write_true, allowed_connection_current, allowed_connection, number_of_requests
+
+    max_workers = max(1, int(max_workers))
+    max_connections = int(params.get('max_connections', 10000))
     
-    os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
+    # FIX [C-1]: Handle basename-only paths by using current directory instead of empty path.
+    metadata_parent_dir = os.path.dirname(metadata_file) or "."
+    missing_parent_dir = os.path.dirname(missing_sequences_file) or "."
+    # FIX [F-1]: Ensure both output directories exist before background flush threads write files.
+    for parent_dir in {metadata_parent_dir, missing_parent_dir}:
+        os.makedirs(parent_dir, exist_ok=True)
 
     with metadata_lock:
         metadata_list.clear()
@@ -997,16 +1058,18 @@ def get_metadata(sequence_list: List[str], missing_sequences_file: str, metadata
     write_true = True
     allowed_connection_current = allowed_connection
     
-    monitor_jobs(job_patterns, interval=monitoring['monitor_interval'], start=True, check_timeout=monitoring['monitor_check_timeout'], max_connections=params['max_connections'])
+    monitor_jobs(job_patterns, interval=monitoring['monitor_interval'], start=True, check_timeout=monitoring['monitor_check_timeout'], max_connections=max_connections)
     monitor_connections(interval=monitoring['monitor_interval'], start=True, check_timeout=monitoring['monitor_check_timeout'])
     
     logger.info(f"Starting metadata download for {len(sequence_list)} sequences")
     
     job_thread = threading.Thread(
         target=monitor_jobs, 
-        args=(job_patterns, monitoring['monitor_interval'], False, monitoring['monitor_check_timeout'], params['max_connections']),
+        args=(job_patterns, monitoring['monitor_interval'], False, monitoring['monitor_check_timeout'], max_connections),
         daemon=True
     )
+    # FIX [G-3]: Keep explicit references for deterministic shutdown checks.
+    started_threads: List[threading.Thread] = [job_thread]
     job_thread.start()
     
     connections_thread = threading.Thread(
@@ -1014,6 +1077,7 @@ def get_metadata(sequence_list: List[str], missing_sequences_file: str, metadata
         args=(monitoring['monitor_interval'], False, monitoring['monitor_check_timeout']),
         daemon=True
     )
+    started_threads.append(connections_thread)
     connections_thread.start()
     
     metadata_thread = threading.Thread(
@@ -1021,6 +1085,7 @@ def get_metadata(sequence_list: List[str], missing_sequences_file: str, metadata
         args=(metadata_file, flush_metadata_buffer, False, monitoring['write_interval'], monitoring['write_check_timeout']),
         daemon=True
     )
+    started_threads.append(metadata_thread)
     metadata_thread.start()
     
     missing_thread = threading.Thread(
@@ -1028,47 +1093,49 @@ def get_metadata(sequence_list: List[str], missing_sequences_file: str, metadata
         args=(missing_sequences_file, flush_missing_sequences_buffer, False, monitoring['write_interval'], monitoring['write_check_timeout']),
         daemon=True
     )
+    started_threads.append(missing_thread)
     missing_thread.start()
     
     number_of_requests_initial = number_of_requests
     time_download_start = time.time()
     
-    sequence_chunks = np.array_split(sequence_list, max_workers)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        list(executor.map(
-            metadata_download_wrapping,
-            [mly_key] * len(sequence_chunks),
-            sequence_chunks,
-            [columns] * len(sequence_chunks),
-            [params] * len(sequence_chunks),
-            [batch_size] * len(sequence_chunks),
-            [windows] * len(sequence_chunks)
-        ))
-    
-    thread_stop = True
-    write_true = False
-    time_download_end = time.time()
-    
-    number_of_requests_final = number_of_requests
-    requests_for_download = number_of_requests_final - number_of_requests_initial
-    
-    if requests_for_download > 0:
-        avg_time_per_request = (time_download_end - time_download_start) / requests_for_download
-    else:
-        avg_time_per_request = 0
-    
-    logger.info(f"Metadata download completed in {round(time_download_end-time_download_start, 2)}s")
-    logger.info(f"Requests: {requests_for_download} in {round(time_download_end-time_download_start, 2)}s (avg {round(avg_time_per_request, 2)}s/req)")
-    
-    write_data_on_the_fly(metadata_file, flush_metadata_buffer, end=True, interval=monitoring['write_interval'], check_timeout=monitoring['write_check_timeout'])
-    write_data_on_the_fly(missing_sequences_file, flush_missing_sequences_buffer, end=True, interval=monitoring['write_interval'], check_timeout=monitoring['write_check_timeout'])
-    
-    connections_thread.join(timeout=30)
-    job_thread.join(timeout=30)
-    missing_thread.join(timeout=30)
-    metadata_thread.join(timeout=30)
-    
-    logger.info("Metadata download threads stopped")
+    try:
+        sequence_chunks = np.array_split(sequence_list, max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            list(executor.map(
+                metadata_download_wrapping,
+                [mly_key] * len(sequence_chunks),
+                sequence_chunks,
+                [columns] * len(sequence_chunks),
+                [params] * len(sequence_chunks),
+                [batch_size] * len(sequence_chunks),
+                [windows] * len(sequence_chunks)
+            ))
+
+        time_download_end = time.time()
+
+        number_of_requests_final = number_of_requests
+        requests_for_download = number_of_requests_final - number_of_requests_initial
+
+        if requests_for_download > 0:
+            avg_time_per_request = (time_download_end - time_download_start) / requests_for_download
+        else:
+            avg_time_per_request = 0
+
+        logger.info(f"Metadata download completed in {round(time_download_end-time_download_start, 2)}s")
+        logger.info(f"Requests: {requests_for_download} in {round(time_download_end-time_download_start, 2)}s (avg {round(avg_time_per_request, 2)}s/req)")
+    finally:
+        # FIX [G-3]: Always stop monitor/writer threads even when worker execution fails.
+        thread_stop = True
+        # FIX [D-1]: Stop writer loops before guaranteed synchronous final flush.
+        write_true = False
+        # FIX [F-1]: Force final flush to avoid data loss when write loop exits before end-call.
+        flush_metadata_buffer(metadata_file)
+        # FIX [F-1]: Force final missing-sequence flush under all exit paths.
+        flush_missing_sequences_buffer(missing_sequences_file)
+        # FIX [G-3]: Ensure all background threads are joined before returning.
+        join_threads_with_timeout(started_threads, timeout=30)
+        logger.info("Metadata download threads stopped")
 
 
 # ============================================================================

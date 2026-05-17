@@ -255,3 +255,153 @@ class ProcessSingleTileTests(unittest.TestCase):
         self.assertEqual(os.path.normpath(captured["meta"]), os.path.normpath(expected_meta))
         self.assertEqual(captured["kwargs"]["mly_key"], "k")
         self.assertEqual(captured["kwargs"]["extra"], "val")
+
+
+class GetMetadataMainTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_get_metadata_module()
+
+    def _build_config(self):
+        return {
+            "metadata_params": {
+                "batch_size": 5,
+                "windows": False,
+                "max_workers": 2,
+                "call_limit": 2,
+                "empty_data_attempts": 1,
+                "retries": 2,
+                "max_connections": 50,
+                "sleep_time": 1,
+                "missing_attempts": 2,
+                "file_age_threshold_seconds": 123,
+            },
+            "paths": {
+                "raw_metadata_dir": "/tmp/raw_meta",
+                "completed_tiles_dir": "/tmp/completed",
+            },
+            "params": {
+                "zoom_level": 8,
+                "mly_key": "abc123",
+            },
+            "metadata_columns": ["sequence", "id", "url"],
+        }
+
+    def test_main_processes_only_selected_chunk_for_instance(self):
+        cfg = self._build_config()
+
+        tiles_rows = [
+            {"id": f"seq{i}", "z8_tiles": f"tile-{i}"}
+            for i in range(6)
+        ]
+        fake_gdf = FakeTilesGdf("z8_tiles", tiles_rows)
+
+        processed_tiles = []
+
+        def fake_process_single_tile(tile, *args, **kwargs):
+            processed_tiles.append(tile)
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["get_metadata.py", "2"]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.gpd, "read_file", return_value=fake_gdf, create=True),
+            mock.patch.object(self.module, "process_single_tile", side_effect=fake_process_single_tile),
+            mock.patch.object(self.module.random, "shuffle", side_effect=lambda x: None),
+            mock.patch.dict(self.module.os.environ, {}, clear=True),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(processed_tiles), 2)
+        self.assertEqual(processed_tiles, ["tile-1", "tile-1"])
+
+    def test_main_with_invalid_instance_processes_all_tiles(self):
+        cfg = self._build_config()
+
+        tiles_rows = [
+            {"id": f"seq{i}", "z8_tiles": f"tile-{i}"}
+            for i in range(4)
+        ]
+        fake_gdf = FakeTilesGdf("z8_tiles", tiles_rows)
+
+        processed_tiles = []
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["get_metadata.py", "99"]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.gpd, "read_file", return_value=fake_gdf, create=True),
+            mock.patch.object(self.module, "process_single_tile", side_effect=lambda tile, *a, **k: processed_tiles.append(tile)),
+            mock.patch.object(self.module.random, "shuffle", side_effect=lambda x: None),
+            mock.patch.dict(self.module.os.environ, {}, clear=True),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(processed_tiles), 8)
+        self.assertEqual(set(processed_tiles[:4]), {"tile-0", "tile-1", "tile-2", "tile-3"})
+        self.assertEqual(processed_tiles[:4], processed_tiles[4:8])
+
+    def test_main_normalizes_zero_missing_attempts_to_one(self):
+        cfg = self._build_config()
+        cfg["metadata_params"]["missing_attempts"] = 0
+
+        tiles_rows = [
+            {"id": "seq0", "z8_tiles": "tile-0"},
+            {"id": "seq1", "z8_tiles": "tile-1"},
+        ]
+        fake_gdf = FakeTilesGdf("z8_tiles", tiles_rows)
+
+        processed_tiles = []
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["get_metadata.py"]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.gpd, "read_file", return_value=fake_gdf, create=True),
+            mock.patch.object(self.module, "process_single_tile", side_effect=lambda tile, *a, **k: processed_tiles.append(tile)),
+            mock.patch.object(self.module.random, "shuffle", side_effect=lambda x: None),
+            mock.patch.dict(self.module.os.environ, {}, clear=True),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(processed_tiles), 2)
+        self.assertEqual(set(processed_tiles), {"tile-0", "tile-1"})
+
+    def test_main_creates_output_directory_when_missing(self):
+        cfg = self._build_config()
+        tiles_rows = [{"id": "seq0", "z8_tiles": "tile-0"}]
+        fake_gdf = FakeTilesGdf("z8_tiles", tiles_rows)
+
+        raw_dir = os.path.abspath(cfg["paths"]["raw_metadata_dir"])
+        tiles_filepath = os.path.abspath(
+            os.path.join(
+                cfg["paths"]["completed_tiles_dir"],
+                f"finished_tiles_z{cfg['params']['zoom_level']}.gpkg",
+            )
+        )
+
+        def fake_exists(path):
+            norm = os.path.normpath(path)
+            if norm == os.path.normpath(raw_dir):
+                return False
+            if norm == os.path.normpath(tiles_filepath):
+                return True
+            return True
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["get_metadata.py"]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "makedirs") as makedirs_mock,
+            mock.patch.object(self.module.gpd, "read_file", return_value=fake_gdf, create=True),
+            mock.patch.object(self.module, "process_single_tile"),
+            mock.patch.object(self.module.random, "shuffle", side_effect=lambda x: None),
+            mock.patch.dict(self.module.os.environ, {}, clear=True),
+        ):
+            self.module.main()
+
+        makedirs_mock.assert_called_once_with(raw_dir, exist_ok=True)

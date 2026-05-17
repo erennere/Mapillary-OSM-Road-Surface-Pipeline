@@ -888,24 +888,30 @@ def orchestrate_osm_processing(countries_df, output_filepath, osm_file_pattern, 
     osm_results = []
     futures = []
 
-    conns, temps = create_connections(max_workers, sub_threads)
-    countries_split = np.array_split(countries, max_workers)
+    conns = []
+    temps = []
+    # FIX [F-1]: Keep DB resource lifecycle in a try/finally so worker errors do not leak files/connections.
+    try:
+        conns, temps = create_connections(max_workers, sub_threads)
+        countries_split = np.array_split(countries, max_workers)
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        for i, chunk in enumerate(countries_split):
-            future = executor.submit(process_osm_chunk, chunk, osm_file_pattern, conns[i])
-            futures.append(future)
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            for i, chunk in enumerate(countries_split):
+                future = executor.submit(process_osm_chunk, chunk, osm_file_pattern, conns[i])
+                futures.append(future)
 
-        for future in as_completed(futures):
-            result = future.result()
-            if result is not None and len(result) > 0:
-                osm_results.extend(result)
-
-    for conn in conns:
-        conn.close()
-    for temp in temps:
-        if os.path.exists(temp):
-            os.remove(temp)
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None and len(result) > 0:
+                    osm_results.extend(result)
+    finally:
+        # FIX [F-1]: Always close opened DuckDB connections.
+        for conn in conns:
+            conn.close()
+        # FIX [F-1]: Always remove temporary DB files after processing.
+        for temp in temps:
+            if os.path.exists(temp):
+                os.remove(temp)
 
     if not osm_results:
         logging.warning("No OSM results were produced; skipping CSV export.")
@@ -925,6 +931,8 @@ def build_runtime_config(cfg):
     stats_cfg = cfg.get('statistics', {})
     agg_cfg = stats_cfg.get('aggregation', {})
 
+    max_workers = max(1, int(agg_cfg.get('max_workers', 16)))
+
     config = {
         'osm_file_pattern': cfg['paths'].get('osm_saving_dir', '*.parquet'),
         'results_dir': os.path.join(os.path.abspath(cfg['paths'].get('stats_dir')), 'geographic_layers'),
@@ -941,7 +949,7 @@ def build_runtime_config(cfg):
         'urban_areas': cfg['geographic_layers']['urban_area_layers'],
         'memory_limit_gb': int(agg_cfg.get('memory_limit_gb', 2010)),
         'number_of_cpus': int(agg_cfg.get('number_of_cpus', 64)),
-        'max_workers': int(agg_cfg.get('max_workers', 16)),
+        'max_workers': max_workers,
     }
     config['sub_threads'] = max(1, config['number_of_cpus'] // config['max_workers'])
     return config
@@ -962,24 +970,24 @@ def main():
     pattern_query_country = 'countries_with_stats_*.parquet'
     pattern_query_continent = 'continents_with_stats_*.parquet'
     pattern_query_world = 'world_with_stats_*.parquet'
-    pattern_query_GHSL = f'{config["urban_areas"][0]}_*.parquet'
-    pattern_query_Africapolis = f'{config["urban_areas"][1]}_*.parquet'
+    urban_patterns = [f'{urban_area}_*.parquet' for urban_area in config['urban_areas']]
 
     input_filename_pattern_query_z14 = f"{config['results_dir']}/z14_tiles/{pattern_query_z14}"
     input_filename_pattern_query_z8 = f"{config['results_dir']}/{zoom_level}_tiles/{pattern_query_z8}"
     input_filename_pattern_query_country = f"{config['results_dir']}/countries/{pattern_query_country}"
     input_filename_pattern_query_continent = f"{config['results_dir']}/continents/{pattern_query_continent}"
     input_filename_pattern_query_world = f"{config['results_dir']}/world/{pattern_query_world}"
-    input_filename_pattern_query_GHSL = f"{config['results_dir']}/urban/{pattern_query_GHSL}"
-    input_filename_pattern_query_Africapolis = f"{config['results_dir']}/urban/{pattern_query_Africapolis}"
+    urban_input_patterns = [f"{config['results_dir']}/urban/{pattern}" for pattern in urban_patterns]
 
     output_filename_query_z14 = f"{config['results_dir_compiled']}/{pattern_query_z14.replace('*', 'all')}"
     output_filename_query_z8 = f"{config['results_dir_compiled']}/{pattern_query_z8.replace('*', 'all')}"
     output_filename_query_country = f"{config['results_dir_compiled']}/{pattern_query_country.replace('*', 'all')}"
     output_filename_query_continent = f"{config['results_dir_compiled']}/{pattern_query_continent.replace('*', 'all')}"
     output_filename_query_world = f"{config['results_dir_compiled']}/{pattern_query_world.replace('*', 'all')}"
-    output_filename_query_GHSL = f"{config['results_dir_compiled']}/{pattern_query_GHSL.replace('*', 'all')}"
-    output_filename_query_Africapolis = f"{config['results_dir_compiled']}/{pattern_query_Africapolis.replace('*', 'all')}"
+    urban_output_patterns = [
+        f"{config['results_dir_compiled']}/{pattern.replace('*', 'all')}"
+        for pattern in urban_patterns
+    ]
 
     input_filepaths = {
         'z14': input_filename_pattern_query_z14,
@@ -987,8 +995,6 @@ def main():
         'country': input_filename_pattern_query_country,
         'continent': input_filename_pattern_query_continent,
         'world': input_filename_pattern_query_world,
-        'GHSL': input_filename_pattern_query_GHSL,
-        'Africapolis': input_filename_pattern_query_Africapolis
     }
     output_filepaths = {
         'z14': output_filename_query_z14,
@@ -996,14 +1002,13 @@ def main():
         'country': output_filename_query_country,
         'continent': output_filename_query_continent,
         'world': output_filename_query_world,
-        'GHSL': output_filename_query_GHSL,
-        'Africapolis': output_filename_query_Africapolis
     }
 
     osm_filepath = config['osm_file_pattern']
     country_filepath = config['country_layer']
     continent_filepath = config['continent_layer']
-    urban_filepaths = [os.path.abspath(f"{config['paths']['processed_dir']}/{name}") for name in config['urban_layers']]
+    # FIX [B-1]: Use runtime config key produced by build_runtime_config.
+    urban_filepaths = [os.path.abspath(f"{config['urban_areas_dir']}/{name}") for name in config['urban_layers']]
 
     # Optional branch for country-wise pre-aggregation export.
     process_non_temporal_osm = False
@@ -1025,27 +1030,37 @@ def main():
     conns, temps = create_connections(1, config['number_of_cpus'], config['memory_limit_gb'])
     conn = conns[0]
     temp = temps[0]
-    for query in queries:
-        logging.info(f"Executing query: {query}...")  # Log the beginning of the query for reference
-        try:
-            conn.execute(query)
-            logging.info("Query executed successfully.")
-        except Exception as e:
-            logging.error(f"Error executing query: {e}")
+    try:
+        for query in queries:
+            logging.info(f"Executing query: {query}...")  # Log the beginning of the query for reference
+            try:
+                conn.execute(query)
+                logging.info("Query executed successfully.")
+            except Exception as e:
+                logging.error(f"Error executing query: {e}")
 
-    process_urban_areas(
-        True,
-        config['urban_layer_cols'],
-        [input_filepaths['Africapolis'], input_filepaths['GHSL']],
-        [output_filepaths['Africapolis'], output_filepaths['GHSL']],
-        urban_filepaths,
-        conn,
-    )
-
-    if conn:
-        conn.close()
-    if os.path.exists(temp):
-        os.remove(temp)
+        urban_count = min(
+            len(config['urban_layer_cols']),
+            len(urban_input_patterns),
+            len(urban_output_patterns),
+            len(urban_filepaths),
+        )
+        process_urban = urban_count > 0
+        process_urban_areas(
+            process_urban,
+            config['urban_layer_cols'][:urban_count],
+            urban_input_patterns[:urban_count],
+            urban_output_patterns[:urban_count],
+            urban_filepaths[:urban_count],
+            conn,
+        )
+    finally:
+        # FIX [F-1]: Always close connection regardless of downstream failures.
+        if conn:
+            conn.close()
+        # FIX [F-1]: Always remove temporary DB file if it exists.
+        if os.path.exists(temp):
+            os.remove(temp)
 if __name__ == "__main__":
     main()
 

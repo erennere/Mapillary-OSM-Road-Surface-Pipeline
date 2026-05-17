@@ -62,6 +62,7 @@ One Parquet per OSM file with columns:
 import sys
 import os
 import logging
+import re
 from datetime import datetime
 import random
 import duckdb
@@ -176,7 +177,11 @@ def main():
         sys.exit(1)
     
     points_filename = os.path.basename(sys.argv[1])
-    tile = points_filename.split('.')[0].split('_')[-2]
+    stem_tokens = os.path.splitext(points_filename)[0].split('_')
+    tile = next((token for token in reversed(stem_tokens) if re.match(r'^\d+-\d+-\d+$', token)), None)
+    if tile is None:
+        logging.error(f"Could not extract tile id from filename: {points_filename}")
+        sys.exit(1)
     earth_radius = cfg['params']['earth_radius']
     zoom_level = cfg['params']['zoom_level']
     distance_threshold = cfg['params']['distance_threshold']
@@ -186,6 +191,14 @@ def main():
     osm_dir = os.path.abspath(os.path.join(cfg['paths']['osm_partitioned_dir'], f'tile={tile}'))
     saving_filedir = os.path.abspath(os.path.join(cfg['paths']['osm_intersections_dir'], f'tile={tile}'))
     metadata_filepath = os.path.join(points_dir, points_filename)
+
+    if not os.path.exists(metadata_filepath):
+        logging.warning(f"Skipping processing: metadata file not found at {metadata_filepath}")
+        return
+
+    if not os.path.isdir(osm_dir):
+        logging.warning(f"Skipping processing: OSM directory not found at {osm_dir}")
+        return
 
     updated_after = datetime.fromisoformat(cfg['metadata_params']['updated_after'])
     mtime = datetime.fromtimestamp(os.path.getmtime(metadata_filepath)) 

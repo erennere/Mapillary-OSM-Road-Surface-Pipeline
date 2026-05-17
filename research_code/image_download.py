@@ -105,7 +105,7 @@ async def fetch_image(url, session):
         bytes: Raw image data if successful, None on failure.
     """
     try:
-        async with session.get(url) as response:
+        async with session.get(url, timeout=10) as response:
             if response.status != 200:
                 logging.warning(f"Failed to fetch image from {url}. Status code: {response.status}")
                 return None
@@ -356,6 +356,19 @@ def process_tasks_wrapper(chunk, task_args, download_args, batch_size=1000, org_
     ))
     return 
 
+
+def join_threads_with_timeout(threads, timeout=30):
+    """Join all threads with timeout and raise if any thread remains alive."""
+    for thread in threads:
+        thread.join(timeout=timeout)
+
+    alive_threads = [
+        thread for thread in threads
+        if hasattr(thread, "is_alive") and callable(thread.is_alive) and thread.is_alive()
+    ]
+    if alive_threads:
+        raise RuntimeError(f"Failed to stop background threads: {len(alive_threads)}")
+
 def orchestrate(metadata, missing_images_file, original_dir, resized_dir, 
                 download_args, max_workers, batch_size, windows, org_save_true):
     """
@@ -386,7 +399,8 @@ def orchestrate(metadata, missing_images_file, original_dir, resized_dir,
         missing_image_ids.clear()
     
     # Set up directories
-    for dir_path in [original_dir, resized_dir, os.path.dirname(missing_images_file)]:
+    missing_parent_dir = os.path.dirname(missing_images_file) or "."
+    for dir_path in [original_dir, resized_dir, missing_parent_dir]:
         if not os.path.exists(dir_path):
             os.makedirs(dir_path, exist_ok=True)
     
@@ -398,10 +412,13 @@ def orchestrate(metadata, missing_images_file, original_dir, resized_dir,
     thread_stop = False
     sequences_thread = threading.Thread(target=write_missing_images, args=(missing_images_file,))
     sequences_thread.daemon = True
+    # FIX [G-3]: Track started background threads for deterministic shutdown.
+    started_threads = [sequences_thread]
     sequences_thread.start()
     
     connections_thread = threading.Thread(target=monitor_connections, args=())
     connections_thread.daemon = True
+    started_threads.append(connections_thread)
     connections_thread.start()
     
     try:
@@ -413,15 +430,17 @@ def orchestrate(metadata, missing_images_file, original_dir, resized_dir,
                 [task_args] * len(chunks),
                 [download_args] * len(chunks),
                 [batch_size] * len(chunks),
-                [windows] * len(chunks),
-                [org_save_true] * len(chunks)
+                # FIX [B-1]: Keep positional argument order aligned with wrapper signature.
+                [org_save_true] * len(chunks),
+                # FIX [B-1]: windows must be passed as the last positional argument.
+                [windows] * len(chunks)
             )
         for result in results:
             pass
     finally:
         thread_stop = True
-        sequences_thread.join()
-        connections_thread.join()
+        # FIX [G-3]: Bound joins and fail explicitly if background threads do not stop.
+        join_threads_with_timeout(started_threads, timeout=30)
 
     logging.warning(f"{len(missing_images)} images could not be downloaded")
 

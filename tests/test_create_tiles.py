@@ -1,4 +1,5 @@
 import importlib
+import runpy
 import sys
 import types
 import unittest
@@ -15,6 +16,16 @@ class FakeGeoDataFrame:
     def __init__(self, geometry=None, crs=None):
         self.data = {"geometry": list(geometry or [])}
         self.crs = crs
+        self.saved = None
+
+        class _ILoc:
+            def __init__(self, parent):
+                self.parent = parent
+
+            def __getitem__(self, _idx):
+                return self.parent
+
+        self.iloc = _ILoc(self)
 
     def __setitem__(self, key, value):
         self.data[key] = list(value)
@@ -24,6 +35,9 @@ class FakeGeoDataFrame:
 
     def __len__(self):
         return len(self.data["geometry"])
+
+    def to_file(self, path, driver=None, index=None):
+        self.saved = (path, driver, index)
 
 
 class FakePolygon:
@@ -110,4 +124,122 @@ class CreateTilesTests(unittest.TestCase):
         self.module.get_tiles_from_polygon(polygon=None, zoom_level=5)
 
         self.assertEqual(self.fake_mercantile.tiles_calls[-1], (-180, -90, 180, 90, 5))
+
+
+class CreateTilesMainExecutionTests(unittest.TestCase):
+    def _install_fake_modules(self, read_parquet_side_effect=None):
+        fake_mercantile = types.ModuleType("mercantile")
+        fake_mercantile.tiles = lambda west, south, east, north, zoom: [FakeTile(1, 2, zoom), FakeTile(3, 4, zoom)]
+        fake_mercantile.bounds = lambda tile: FakeBounds(tile.x, tile.y, tile.x + 0.5, tile.y + 0.5)
+
+        fake_geopandas = types.ModuleType("geopandas")
+        fake_geopandas.GeoDataFrame = FakeGeoDataFrame
+
+        if read_parquet_side_effect is None:
+            read_parquet_side_effect = lambda _path: None
+        fake_geopandas.read_parquet = read_parquet_side_effect
+
+        fake_shapely_geometry = types.ModuleType("shapely.geometry")
+        fake_shapely_geometry.box = lambda west, south, east, north: FakePolygon((west, south, east, north))
+
+        fake_start = types.ModuleType("start")
+        fake_start.load_config = lambda path=None: {
+            "params": {"zoom_level": 8},
+            "paths": {"tiles_save_dir": "/tmp/tiles", "starter_dir": "/tmp/starter"},
+            "filenames": {"starter_polygon_fn": "", "country_filename": "country.parquet"},
+        }
+
+        fake_numpy = types.ModuleType("numpy")
+        fake_numpy.random = types.SimpleNamespace(randint=lambda low, high, size: [0, 1])
+
+        return {
+            "mercantile": fake_mercantile,
+            "geopandas": fake_geopandas,
+            "shapely.geometry": fake_shapely_geometry,
+            "start": fake_start,
+            "numpy": fake_numpy,
+        }
+
+    def test_main_executes_with_country_polygon_loaded(self):
+        class FakeCountryGeom:
+            def __init__(self):
+                self.values = [FakePolygon((10, 20, 30, 40))]
+
+        class FakeCountryData:
+            def __getitem__(self, key):
+                if key == "country":
+                    return types.SimpleNamespace(__eq__=lambda _self, val: [val == "MG"])
+                if isinstance(key, list):
+                    return self
+                raise KeyError(key)
+
+            @property
+            def geometry(self):
+                return FakeCountryGeom()
+
+        fake_modules = self._install_fake_modules(read_parquet_side_effect=lambda _path: FakeCountryData())
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", side_effect=lambda p: False if str(p).replace("\\", "/").endswith("/tmp/tiles") else True),
+            mock.patch("os.makedirs"),
+            mock.patch("builtins.print"),
+        ):
+            runpy.run_module("create_tiles", run_name="__main__")
+
+    def test_main_falls_back_to_world_when_country_polygon_load_fails(self):
+        fake_modules = self._install_fake_modules(read_parquet_side_effect=RuntimeError("boom"))
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("builtins.print"),
+        ):
+            runpy.run_module("create_tiles", run_name="__main__")
+
+    def test_main_does_not_access_iloc_random_sampling_path(self):
+        class NoIlocGeoDataFrame(FakeGeoDataFrame):
+            def __init__(self, geometry=None, crs=None):
+                self.data = {"geometry": list(geometry or [])}
+                self.crs = crs
+                self.saved = None
+
+            @property
+            def iloc(self):
+                raise AssertionError("iloc should not be used in main")
+
+        fake_modules = self._install_fake_modules(read_parquet_side_effect=RuntimeError("boom"))
+        fake_modules["geopandas"].GeoDataFrame = NoIlocGeoDataFrame
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("builtins.print"),
+        ):
+            runpy.run_module("create_tiles", run_name="__main__")
+
+    def test_main_falls_back_to_first_geometry_when_country_filter_not_available(self):
+        class _GeometryValues:
+            values = [FakePolygon((11, 22, 33, 44))]
+
+        class _CountryDataNoFilter:
+            def __getitem__(self, key):
+                raise KeyError(key)
+
+            @property
+            def geometry(self):
+                return _GeometryValues()
+
+        fake_modules = self._install_fake_modules(read_parquet_side_effect=lambda _path: _CountryDataNoFilter())
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("builtins.print"),
+        ):
+            runpy.run_module("create_tiles", run_name="__main__")
 

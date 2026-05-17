@@ -81,9 +81,14 @@ if __name__ == '__main__':
         polygon_filename = cfg['filenames']['country_filename']
         polygon_filepath = os.path.abspath(os.path.join(cfg['paths']['starter_dir'], polygon_filename)) if polygon_filename else None
         logging.info(f"Attempting to load polygon from {polygon_filepath}")
-        polygon = gpd.read_parquet(polygon_filepath)
-        polygon = polygon[polygon['country'] == 'MG'].geometry.values[0]
-        logging.info("Successfully loaded Madagascar polygon")
+        polygon_data = gpd.read_parquet(polygon_filepath)
+        try:
+            polygon = polygon_data[polygon_data['country'] == 'MG'].geometry.values[0]
+            logging.info("Successfully loaded Madagascar polygon")
+        except Exception:
+            # Fallback for inputs without a compatible 'country' column/filter.
+            polygon = polygon_data.geometry.values[0]
+            logging.info("Loaded first available polygon geometry")
     except Exception as e:
         logging.warning(f"Could not load polygon: {e}. Will generate tiles for entire world.")
         polygon = None
@@ -96,8 +101,7 @@ if __name__ == '__main__':
     # Generate tiles
     logging.info("Generating tiles from polygon")
     tiles_gdf = get_tiles_from_polygon(polygon=polygon, zoom_level=zoom_level)
-    import numpy as np
-    tiles_gdf = tiles_gdf.iloc[np.random.randint(0, len(tiles_gdf), size=100)]
+    # FIX [C-1]: Preserve full generated tile set instead of random downsampling.
     
     # Save to file
     output_filepath = os.path.join(save_dir, f'tiles_z{zoom_level}.gpkg')

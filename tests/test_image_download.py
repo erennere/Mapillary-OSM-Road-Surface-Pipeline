@@ -1,5 +1,7 @@
 import importlib
+import asyncio
 import random
+import runpy
 import sys
 import types
 import unittest
@@ -213,6 +215,28 @@ class MonitorConnectionsTests(unittest.TestCase):
             self.module.thread_stop = orig_stop
             self.module.allowed_connections_current = orig_curr
 
+    def test_exits_when_thread_stop_set_during_wait_loop(self):
+        orig_stop = self.module.thread_stop
+        orig_curr = self.module.allowed_connections_current
+        orig_allowed = self.module.allowed_connections
+
+        def fake_sleep(_t):
+            self.module.thread_stop = True
+
+        try:
+            self.module.thread_stop = False
+            self.module.allowed_connections = 77
+            self.module.allowed_connections_current = 0
+
+            with mock.patch.object(self.module.time, "sleep", side_effect=fake_sleep):
+                self.module.monitor_connections(interval=2, start=False, check_timeout=1)
+
+            self.assertEqual(self.module.allowed_connections_current, 77)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.allowed_connections_current = orig_curr
+            self.module.allowed_connections = orig_allowed
+
 
 # ---------------------------------------------------------------------------
 # write_missing_images
@@ -310,6 +334,41 @@ class WriteMissingImagesTests(unittest.TestCase):
             self.module.thread_stop = orig_stop
             self.module.missing_images = orig_missing
 
+    def test_flushes_missing_images_on_stop_during_wait(self):
+        filepath = "/tmp/missing_stop_flush.csv"
+        orig_stop = self.module.thread_stop
+        orig_missing = self.module.missing_images
+
+        writes = []
+
+        class FakeDf:
+            def __init__(self, data):
+                self._data = data
+
+            def __len__(self):
+                return len(self._data)
+
+            def to_csv(self, path, index=False):
+                writes.append(path)
+
+        def fake_sleep(_t):
+            self.module.thread_stop = True
+
+        try:
+            self.module.thread_stop = False
+            self.module.missing_images = [{"id": "1", "url": "http://x/1"}]
+
+            with (
+                mock.patch.object(self.module.pd, "DataFrame", side_effect=FakeDf),
+                mock.patch.object(self.module.time, "sleep", side_effect=fake_sleep),
+            ):
+                self.module.write_missing_images(filepath, interval=2, start=False, check_timeout=1)
+
+            self.assertGreaterEqual(len(writes), 2)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.missing_images = orig_missing
+
 
 # ---------------------------------------------------------------------------
 # process_tasks_wrapper
@@ -330,6 +389,7 @@ class ProcessTasksWrapperTests(unittest.TestCase):
 
         def fake_run(coro):
             asyncio_run_called_with.append(coro)
+            coro.close()
 
         with mock.patch.object(self.module.asyncio, "run", side_effect=fake_run):
             self.module.process_tasks_wrapper(
@@ -351,8 +411,482 @@ class ProcessTasksWrapperTests(unittest.TestCase):
             process_tasks_calls.append(org_save_true)
             return iter([])  # needs to be awaitable – we patch asyncio.run instead
 
-        with mock.patch.object(self.module.asyncio, "run"):
+        def fake_run(coro):
+            coro.close()
+
+        with mock.patch.object(self.module.asyncio, "run", side_effect=fake_run):
             # Just verify the wrapper runs without error and calls asyncio.run
             self.module.process_tasks_wrapper(
                 chunk_rows, task_args, download_args, batch_size=5, org_save_true=True
             )
+
+    def test_windows_true_sets_event_loop_policy(self):
+        task_args = {"original_dir": "/o", "resized_dir": "/r"}
+        download_args = {"image_size": (100, 100), "call_limit": 2, "sleep_time": 1}
+
+        def fake_run(coro):
+            coro.close()
+
+        with (
+            mock.patch.object(self.module.asyncio, "WindowsSelectorEventLoopPolicy", return_value="policy", create=True),
+            mock.patch.object(self.module.asyncio, "set_event_loop_policy", create=True) as set_policy_mock,
+            mock.patch.object(self.module.asyncio, "run", side_effect=fake_run),
+        ):
+            self.module.process_tasks_wrapper([], task_args, download_args, windows=True)
+
+        set_policy_mock.assert_called_once_with("policy")
+
+
+# ---------------------------------------------------------------------------
+# process_tasks / orchestrate
+# ---------------------------------------------------------------------------
+
+class ProcessTasksAndOrchestrateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_image_download_module()
+
+    def test_process_tasks_records_missing_once_and_cleans_partial_files(self):
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        async def fake_process_image(*args, **kwargs):
+            return ["img_a", "dup_id", "http://x/a"], True
+
+        async def fake_gather(*args, **kwargs):
+            for coro in args:
+                if hasattr(coro, "close"):
+                    coro.close()
+            return [
+                (["img_a", "dup_id", "http://x/a"], True),
+                (["img_b", "dup_id", "http://x/b"], True),
+                None,
+                Exception("boom"),
+                (["img_c", "ok_id", "http://x/c"], False),
+            ]
+
+        self.module.missing_images = []
+        self.module.missing_image_ids = set()
+
+        removed_files = []
+
+        with (
+            mock.patch.object(self.module, "create_tasks_in_generator", return_value=[[({"id": "x", "url": "u"}, "/o", "/r", {})]]),
+            mock.patch.object(self.module.aiohttp, "ClientSession", return_value=FakeSession(), create=True),
+            mock.patch.object(self.module, "process_image", side_effect=fake_process_image),
+            mock.patch.object(self.module.asyncio, "gather", side_effect=fake_gather, create=True),
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.os, "remove", side_effect=lambda p: removed_files.append(p)),
+        ):
+            asyncio.run(
+                self.module.process_tasks(
+                    chunk=[{"id": "x", "url": "u"}],
+                    original_dir="/orig",
+                    resized_dir="/res",
+                    image_size=(64, 64),
+                    batch_size=1,
+                    call_limit=1,
+                    sleep_time=1,
+                    org_save_true=False,
+                )
+            )
+
+        self.assertEqual(len(self.module.missing_images), 1)
+        self.assertIn("dup_id", self.module.missing_image_ids)
+        self.assertEqual(len(removed_files), 2)
+
+    def test_orchestrate_runs_workers_and_stops_threads(self):
+        calls = {"worker": 0, "threads_started": 0, "threads_joined": 0}
+
+        class FakeThread:
+            def __init__(self, target=None, args=()):
+                self.target = target
+                self.args = args
+                self.daemon = False
+
+            def start(self):
+                calls["threads_started"] += 1
+
+            def join(self, timeout=None):
+                calls["threads_joined"] += 1
+
+            def is_alive(self):
+                return False
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, *iterables):
+                for args in zip(*iterables):
+                    calls["worker"] += 1
+                    fn(*args)
+                return []
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.np, "array_split", return_value=[[{"id": 1}], [{"id": 2}]], create=True),
+            mock.patch.object(self.module, "process_tasks_wrapper"),
+            mock.patch.object(self.module.threading, "Thread", side_effect=FakeThread),
+            mock.patch.object(self.module, "ThreadPoolExecutor", side_effect=FakeExecutor),
+        ):
+            self.module.orchestrate(
+                metadata=[{"id": 1}],
+                missing_images_file="/tmp/logs/missing.csv",
+                original_dir="/tmp/img/orig",
+                resized_dir="/tmp/img/res",
+                download_args={"image_size": (64, 64), "call_limit": 2, "sleep_time": 1, "allowed_connections": 10},
+                max_workers=2,
+                batch_size=5,
+                windows=False,
+                org_save_true=False,
+            )
+
+        self.assertEqual(calls["worker"], 2)
+        self.assertEqual(calls["threads_started"], 2)
+        self.assertEqual(calls["threads_joined"], 2)
+        self.assertTrue(self.module.thread_stop)
+
+    def test_orchestrate_passes_wrapper_args_in_correct_positional_order(self):
+        calls = {"received": []}
+
+        class FakeThread:
+            def __init__(self, target=None, args=()):
+                self.target = target
+                self.args = args
+                self.daemon = False
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, *iterables):
+                for args in zip(*iterables):
+                    fn(*args)
+                return []
+
+        def fake_wrapper(chunk, task_args, download_args, batch_size, org_save_true, windows):
+            calls["received"].append((batch_size, org_save_true, windows))
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.np, "array_split", return_value=[[{"id": 1}], [{"id": 2}]], create=True),
+            mock.patch.object(self.module.threading, "Thread", side_effect=FakeThread),
+            mock.patch.object(self.module, "ThreadPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "process_tasks_wrapper", side_effect=fake_wrapper),
+        ):
+            self.module.orchestrate(
+                metadata=[{"id": 1}],
+                missing_images_file="/tmp/logs/missing.csv",
+                original_dir="/tmp/img/orig",
+                resized_dir="/tmp/img/res",
+                download_args={"image_size": (64, 64), "call_limit": 2, "sleep_time": 1, "allowed_connections": 10},
+                max_workers=2,
+                batch_size=7,
+                windows=True,
+                org_save_true=False,
+            )
+
+        self.assertTrue(calls["received"])
+        self.assertTrue(all(b == 7 for b, _, _ in calls["received"]))
+        self.assertTrue(all(o is False for _, o, _ in calls["received"]))
+        self.assertTrue(all(w is True for _, _, w in calls["received"]))
+
+    def test_orchestrate_accepts_basename_missing_images_file_path(self):
+        calls = {"makedirs": []}
+
+        class FakeThread:
+            def __init__(self, target=None, args=()):
+                self.target = target
+                self.args = args
+                self.daemon = False
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, *iterables):
+                for args in zip(*iterables):
+                    fn(*args)
+                return []
+
+        def fake_makedirs(path, exist_ok=False):
+            calls["makedirs"].append(path)
+            if path == "":
+                raise ValueError("empty path")
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "makedirs", side_effect=fake_makedirs),
+            mock.patch.object(self.module.np, "array_split", return_value=[[{"id": 1}]], create=True),
+            mock.patch.object(self.module.threading, "Thread", side_effect=FakeThread),
+            mock.patch.object(self.module, "ThreadPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "process_tasks_wrapper"),
+        ):
+            self.module.orchestrate(
+                metadata=[{"id": 1}],
+                missing_images_file="missing.csv",
+                original_dir="/tmp/img/orig",
+                resized_dir="/tmp/img/res",
+                download_args={"image_size": (64, 64), "call_limit": 2, "sleep_time": 1, "allowed_connections": 10},
+                max_workers=1,
+                batch_size=5,
+                windows=False,
+                org_save_true=False,
+            )
+
+        self.assertIn(".", calls["makedirs"])
+
+
+class ImageFetchAndSaveTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_image_download_module()
+
+    def test_fetch_image_returns_bytes_on_success(self):
+        calls = []
+
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def read(self):
+                return b"abc"
+
+        class FakeSession:
+            def get(self, _url, **kwargs):
+                calls.append(kwargs)
+                return FakeResponse()
+
+        result = asyncio.run(self.module.fetch_image("http://x", FakeSession()))
+        self.assertEqual(result, b"abc")
+        self.assertEqual(calls[0].get("timeout"), 10)
+
+    def test_fetch_image_returns_none_on_non_200(self):
+        class FakeResponse:
+            status = 404
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def read(self):
+                return b""
+
+        class FakeSession:
+            def get(self, _url, **kwargs):
+                return FakeResponse()
+
+        result = asyncio.run(self.module.fetch_image("http://x", FakeSession()))
+        self.assertIsNone(result)
+
+    def test_get_image_success_after_retry(self):
+        async def fake_sleep(_t):
+            return None
+
+        fetch_calls = {"n": 0}
+
+        async def fake_fetch(_url, _session):
+            fetch_calls["n"] += 1
+            return None if fetch_calls["n"] == 1 else b"data"
+
+        with (
+            mock.patch.object(self.module, "fetch_image", side_effect=fake_fetch),
+            mock.patch.object(self.module.asyncio, "sleep", side_effect=fake_sleep, create=True),
+            mock.patch.object(self.module.np, "frombuffer", return_value=[1, 2, 3]),
+            mock.patch.object(self.module.np, "ndarray", list),
+            mock.patch.object(self.module.cv2, "imdecode", return_value=[9, 9]),
+            mock.patch.object(self.module.cv2, "resize", return_value=[5, 5]),
+        ):
+            image, resized = asyncio.run(
+                self.module.get_image("http://x", (64, 64), session=object(), call_limit=3, sleep_time=1)
+            )
+
+        self.assertEqual(fetch_calls["n"], 2)
+        self.assertEqual(image, [9, 9])
+        self.assertEqual(resized, [5, 5])
+
+    def test_get_image_returns_none_when_all_attempts_fail(self):
+        async def fake_sleep(_t):
+            return None
+
+        async def fake_fetch(_url, _session):
+            return None
+
+        with (
+            mock.patch.object(self.module, "fetch_image", side_effect=fake_fetch),
+            mock.patch.object(self.module.asyncio, "sleep", side_effect=fake_sleep, create=True),
+        ):
+            image, resized = asyncio.run(
+                self.module.get_image("http://x", (64, 64), session=object(), call_limit=2, sleep_time=1)
+            )
+
+        self.assertIsNone(image)
+        self.assertIsNone(resized)
+
+    def test_save_image_writes_resized_only_when_org_save_false(self):
+        calls = []
+        with (
+            mock.patch.object(self.module.np, "ndarray", list),
+            mock.patch.object(self.module.cv2, "imwrite", side_effect=lambda p, i: calls.append(p)),
+        ):
+            ok, exc = asyncio.run(
+                self.module.save_image("/tmp/o.png", "/tmp/r.png", [1], [2], org_save_true=False)
+            )
+
+        self.assertTrue(ok)
+        self.assertFalse(exc)
+        self.assertEqual(calls, ["/tmp/r.png"])
+
+    def test_save_image_returns_failure_for_invalid_inputs(self):
+        with mock.patch.object(self.module.np, "ndarray", list):
+            ok, exc = asyncio.run(
+                self.module.save_image("/tmp/o.png", "/tmp/r.png", "bad", [2], org_save_true=True)
+            )
+
+        self.assertFalse(ok)
+        self.assertTrue(exc)
+
+    def test_process_image_returns_exception_false_on_success(self):
+        async def fake_get_image(*args, **kwargs):
+            return [1], [2]
+
+        async def fake_save_image(*args, **kwargs):
+            return True, False
+
+        row = {"id": "7", "url": "http://x/7"}
+        with (
+            mock.patch.object(self.module, "get_image", side_effect=fake_get_image),
+            mock.patch.object(self.module, "save_image", side_effect=fake_save_image),
+        ):
+            info, exc = asyncio.run(
+                self.module.process_image(row, "/tmp/o", "/tmp/r", {"image_size": (32, 32), "call_limit": 2, "sleep_time": 1}, session=object(), org_save_true=True)
+            )
+
+        self.assertEqual(info[1], "7")
+        self.assertFalse(exc)
+
+
+class ImageDownloadMainExecutionTests(unittest.TestCase):
+    def _fake_modules(self):
+        fake_numpy = types.ModuleType("numpy")
+        fake_numpy.frombuffer = lambda data, dtype: data
+        fake_numpy.uint8 = int
+        fake_numpy.ndarray = list
+        fake_numpy.array_split = lambda seq, n: [seq]
+
+        class FakeMetadata:
+            def __len__(self):
+                return 0
+
+        fake_pandas = types.ModuleType("pandas")
+        fake_pandas.DataFrame = lambda data: data
+        fake_pandas.read_parquet = lambda path: FakeMetadata()
+
+        fake_cv2 = types.ModuleType("cv2")
+        fake_cv2.imdecode = lambda *args: None
+        fake_cv2.resize = lambda *args: None
+        fake_cv2.IMREAD_COLOR = 1
+        fake_cv2.imwrite = lambda *args: None
+
+        fake_aiohttp = types.ModuleType("aiohttp")
+        fake_start = types.ModuleType("start")
+        fake_start.load_config = lambda path=None: {
+            "image_params": {
+                "image_size": [256, 427],
+                "call_limit": 2,
+                "sleep_time": 1,
+                "allowed_connections": 10,
+                "max_workers": 1,
+                "batch_size": 1,
+                "windows": False,
+                "org_save_true": False,
+                "random_seed": 42,
+            },
+            "paths": {
+                "image_dir": "/tmp/images",
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/tiles",
+            },
+        }
+
+        fake_glob = types.ModuleType("glob")
+        return {
+            "numpy": fake_numpy,
+            "pandas": fake_pandas,
+            "cv2": fake_cv2,
+            "aiohttp": fake_aiohttp,
+            "start": fake_start,
+            "glob": fake_glob,
+        }
+
+    def test_main_raises_usage_error_when_chunk_args_missing(self):
+        modules = self._fake_modules()
+        modules["glob"].glob = lambda *a, **k: []
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch("os.chdir"),
+            mock.patch.object(sys, "argv", ["image_download.py"]),
+        ):
+            with self.assertRaises(ValueError):
+                runpy.run_module("image_download", run_name="__main__")
+
+    def test_main_handles_empty_selected_file_chunk(self):
+        modules = self._fake_modules()
+        modules["glob"].glob = lambda *a, **k: []
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch("os.chdir"),
+            mock.patch.object(sys, "argv", ["image_download.py", "0", "10"]),
+        ):
+            runpy.run_module("image_download", run_name="__main__")

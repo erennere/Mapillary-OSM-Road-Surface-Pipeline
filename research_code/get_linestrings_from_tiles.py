@@ -196,7 +196,11 @@ if __name__ == "__main__":
             continent_file, failed_tiles_gdf = process_tile_file(file, mly_key, retries)
             
             if continent_file is not None:
-                continent_file.drop_duplicates(subset=['id', f'z{zoom_level}_tiles'], inplace=True)
+                completed_subset = [c for c in ['id', f'z{zoom_level}_tiles'] if c in continent_file.columns]
+                if completed_subset:
+                    continent_file.drop_duplicates(subset=completed_subset, inplace=True)
+                else:
+                    continent_file.drop_duplicates(inplace=True)
                 continent_file.reset_index(drop=True, inplace=True)
                 output_filepath = os.path.join(completed_tiles_dir, f"finished_{filename}")
                 continent_file.to_file(output_filepath, driver="GPKG")
@@ -204,7 +208,11 @@ if __name__ == "__main__":
                 sys.stdout.flush()
             
             if failed_tiles_gdf is not None:
-                failed_tiles_gdf.drop_duplicates(subset=['id', f'z{zoom_level}_tiles'], inplace=True)
+                failed_subset = [c for c in ['id', f'z{zoom_level}_tiles', 'z', 'x', 'y'] if c in failed_tiles_gdf.columns]
+                if failed_subset:
+                    failed_tiles_gdf.drop_duplicates(subset=failed_subset, inplace=True)
+                else:
+                    failed_tiles_gdf.drop_duplicates(inplace=True)
                 failed_tiles_gdf.reset_index(drop=True, inplace=True)
                 output_filepath = os.path.join(failed_tiles_dir, f"failed_{filename}")
                 failed_tiles_gdf.to_file(output_filepath, driver="GPKG")

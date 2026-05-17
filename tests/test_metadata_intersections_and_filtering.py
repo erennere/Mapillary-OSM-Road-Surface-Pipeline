@@ -366,7 +366,7 @@ class LayerIntersectionsTests(unittest.TestCase):
         # cond1 (country_intersected_*) must exist → True
         # cond2 (tmp_country_intersected_*) must NOT exist → False (so while loop exits)
         def exists_mock(p):
-            basename = p.split("/")[-1] if "/" in p else p
+            basename = p.replace("\\", "/").split("/")[-1]
             if basename.startswith("tmp_"):
                 return False   # temp file gone → exit second while loop
             return True        # all other files present → skip creation, exit first while loop
@@ -381,7 +381,10 @@ class LayerIntersectionsTests(unittest.TestCase):
             )
 
         # Last entry is always the country_filename_new
-        self.assertEqual(result[-1], expected_country_new)
+        self.assertEqual(
+            result[-1].replace("\\", "/"),
+            expected_country_new.replace("\\", "/"),
+        )
 
     def test_africapolis_none_produces_shorter_path_list(self):
         gen = random.Random(3302)
@@ -389,7 +392,7 @@ class LayerIntersectionsTests(unittest.TestCase):
         ghsl = f"ghsl_{gen.randint(100, 999)}.gpkg"
 
         def exists_mock(p):
-            basename = p.split("/")[-1] if "/" in p else p
+            basename = p.replace("\\", "/").split("/")[-1]
             return not basename.startswith("tmp_")
 
         with (
@@ -419,7 +422,7 @@ class LayerIntersectionsTests(unittest.TestCase):
         expected_ghsl_intersected = f"{output_dir}/country_intersected_intersected_{ghsl.replace('.gpkg', '.parquet')}"
 
         def exists_mock(p):
-            basename = p.split("/")[-1] if "/" in p else p
+            basename = p.replace("\\", "/").split("/")[-1]
             return not basename.startswith("tmp_")
 
         with (
@@ -431,5 +434,495 @@ class LayerIntersectionsTests(unittest.TestCase):
                 "cntry.parquet", "s3://bucket", ghsl, None
             )
 
-        self.assertEqual(result[0], expected_ghsl_intersected)
+        self.assertEqual(
+            result[0].replace("\\", "/"),
+            expected_ghsl_intersected.replace("\\", "/"),
+        )
+
+    def test_is_first_true_runs_download_and_layer_conversions(self):
+        output_dir = "/tmp/proc"
+        continents_filename = "/tmp/continents.parquet"
+        country_filename = "countries.parquet"
+        ghsl_filename = "ghsl.gpkg"
+        africapolis_filename = "africa.shp"
+
+        ghsl_new = f"{output_dir}/intersected_ghsl.parquet"
+        afric_new = f"{output_dir}/intersected_africa.parquet"
+        country_new = f"{output_dir}/intersected_{country_filename}"
+
+        ghsl_country_inter = f"{output_dir}/country_intersected_intersected_ghsl.parquet"
+        afric_country_inter = f"{output_dir}/country_intersected_intersected_africa.parquet"
+        afric_tmp = f"{output_dir}/tmp_country_intersected_intersected_africa.parquet"
+
+        intersection_calls = []
+
+        class FakeCols:
+            @property
+            def str(self):
+                return self
+
+            def lstrip(self, _value):
+                return self
+
+        class FakeLayer:
+            def __init__(self):
+                self.columns = FakeCols()
+                self.saved = []
+
+            def to_crs(self, _epsg):
+                return self
+
+            def to_parquet(self, path, compression=None, index=None):
+                self.saved.append(path)
+
+        def exists_mock(path):
+            norm = str(path).replace("\\", "/")
+            true_set = {
+                continents_filename,
+                ghsl_country_inter,
+                afric_country_inter,
+            }
+            if norm in true_set:
+                return True
+            if norm == afric_tmp:
+                return False
+            return False
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", side_effect=exists_mock),
+            mock.patch.object(self.module, "download_overture_maps") as dl_mock,
+            mock.patch.object(self.module.gpd, "read_file", return_value=FakeLayer(), create=True),
+            mock.patch.object(
+                self.module,
+                "intersection",
+                side_effect=lambda *args, **kwargs: intersection_calls.append(args),
+            ),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            result = self.module.layer_intersections(
+                True,
+                output_dir,
+                "/tmp/continents",
+                continents_filename,
+                country_filename,
+                "s3://bucket/divisions",
+                ghsl_filename,
+                africapolis_filename,
+            )
+
+        dl_mock.assert_called_once()
+        self.assertEqual(len(intersection_calls), 2)
+        self.assertEqual(result[-1].replace("\\", "/"), country_new.replace("\\", "/"))
+
+    def test_layer_intersections_times_out_when_sync_file_never_appears(self):
+        def exists_mock(path):
+            norm = str(path).replace("\\", "/")
+            if "tmp_country_intersected_" in norm:
+                return False
+            return False
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", side_effect=exists_mock),
+            mock.patch.object(self.module.time, "sleep"),
+            mock.patch.object(self.module.time, "monotonic", side_effect=[0.0, 2.0]),
+        ):
+            with self.assertRaises(TimeoutError):
+                self.module.layer_intersections(
+                    False,
+                    "/tmp/proc",
+                    "/tmp/continents",
+                    "/tmp/continents.parquet",
+                    "countries.parquet",
+                    "s3://bucket/divisions",
+                    "ghsl.gpkg",
+                    None,
+                    wait_timeout_seconds=1,
+                    wait_poll_seconds=0,
+                )
+
+    def test_layer_intersections_raises_clear_error_when_no_continent_geojson_files_exist(self):
+        with (
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "listdir", return_value=[]),
+        ):
+            with self.assertRaises(FileNotFoundError):
+                self.module.layer_intersections(
+                    True,
+                    "/tmp/proc",
+                    "/tmp/continents",
+                    "/tmp/continents.parquet",
+                    "countries.parquet",
+                    "s3://bucket/divisions",
+                    "ghsl.gpkg",
+                    None,
+                )
+
+
+class IntersectionsWithMetadataTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_metadata_intersections_module()
+
+    class _FakeColumns:
+        @property
+        def str(self):
+            return self
+
+        def lstrip(self, _value):
+            return self
+
+    class _FakeGhsDf:
+        def __init__(self):
+            self.columns = IntersectionsWithMetadataTests._FakeColumns()
+
+    def _make_conn(self, fail_on=None):
+        calls = []
+
+        class ExecResult:
+            def df(self):
+                return IntersectionsWithMetadataTests._FakeGhsDf()
+
+        class Conn:
+            def __init__(self):
+                self.closed = False
+
+            def create_function(self, *args, **kwargs):
+                return None
+
+            def execute(self, query):
+                calls.append(query)
+                if fail_on is not None and fail_on in query:
+                    raise RuntimeError("query fail")
+                if "SELECT * REPLACE(ST_AsText(geometry) AS geometry)" in query:
+                    return ExecResult()
+                return None
+
+            def close(self):
+                self.closed = True
+
+        return Conn(), calls
+
+    def test_intersections_with_metadata_success_without_africapolis(self):
+        gen = random.Random(3401)
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, calls = self._make_conn()
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: p == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            result = self.module.intersections_with_metadata(
+                metadata_filename="/tmp/meta.parquet",
+                continent_filename="/tmp/continents.parquet",
+                country_filename="/tmp/countries.parquet",
+                ghsl_filename="/tmp/ghsl.parquet",
+                africapolis_filename=None,
+                unfiltered_output_filename="/tmp/unfiltered.parquet",
+                filtered_output_filename="/tmp/filtered.parquet",
+                ghsl_string="d.ghsl_a, d.ghsl_b",
+                africapolis_string="e.af_a, e.af_b",
+                zoom_level=8,
+                filter_list=[100, 500],
+            )
+
+        self.assertTrue(result)
+        self.assertTrue(any("TO '/tmp/unfiltered.parquet'" in q for q in calls))
+        self.assertTrue(any("TO '/tmp/filtered.parquet'" in q for q in calls))
+        self.assertTrue(conn.closed)
+
+    def test_intersections_with_metadata_success_with_africapolis(self):
+        gen = random.Random(3402)
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, calls = self._make_conn()
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: p == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            result = self.module.intersections_with_metadata(
+                metadata_filename="/tmp/meta.parquet",
+                continent_filename="/tmp/continents.parquet",
+                country_filename="/tmp/countries.parquet",
+                ghsl_filename="/tmp/ghsl.parquet",
+                africapolis_filename="/tmp/africa.parquet",
+                unfiltered_output_filename="/tmp/unfiltered.parquet",
+                filtered_output_filename="/tmp/filtered.parquet",
+                ghsl_string="d.ghsl_a, d.ghsl_b",
+                africapolis_string="e.af_a, e.af_b",
+                zoom_level=8,
+                filter_list=[100, 500],
+            )
+
+        self.assertTrue(result)
+        self.assertTrue(any("read_parquet('/tmp/africa.parquet')" in q for q in calls))
+        self.assertTrue(conn.closed)
+
+    def test_intersections_with_metadata_returns_false_on_query_error(self):
+        gen = random.Random(3403)
+        temp_suffix = gen.randint(0, int(1e12))
+        conn, _ = self._make_conn(fail_on="COPY(")
+
+        with (
+            mock.patch.object(self.module.duckdb, "connect", return_value=conn),
+            mock.patch.object(self.module.random, "randint", return_value=temp_suffix),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: p == f"temp_{temp_suffix}.db"),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            result = self.module.intersections_with_metadata(
+                metadata_filename="/tmp/meta.parquet",
+                continent_filename="/tmp/continents.parquet",
+                country_filename="/tmp/countries.parquet",
+                ghsl_filename="/tmp/ghsl.parquet",
+                africapolis_filename=None,
+                unfiltered_output_filename="/tmp/unfiltered.parquet",
+                filtered_output_filename="/tmp/filtered.parquet",
+                ghsl_string="d.ghsl_a, d.ghsl_b",
+                africapolis_string="e.af_a, e.af_b",
+                zoom_level=8,
+                filter_list=[100, 500],
+            )
+
+        self.assertFalse(result)
+
+
+class MetadataIntersectionsMainTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_metadata_intersections_module()
+
+    def _cfg(self):
+        return {
+            "paths": {
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/root",
+                "continents_dir": "/tmp/continents",
+                "processed_dir": "/tmp/processed",
+                "unfiltered_metadata_dir": "/tmp/unfiltered",
+            },
+            "metadata_params": {"updated_after": "2000-01-01T00:00:00"},
+            "params": {
+                "zoom_level": 8,
+                "urban_threshold": 100,
+                "rural_threshold": 500,
+                "ghsl_col_1": "d.a",
+                "ghsl_col_2": "d.b",
+                "africapolis_col_1": "e.a",
+                "africapolis_col_2": "e.b",
+            },
+            "filenames": {
+                "continents_filename": "continents.parquet",
+                "overture_url": "s3://overture/divisions",
+                "country_filename": "countries.parquet",
+                "ghsl_filename": "ghsl.gpkg",
+                "africapolis_filename": "africa.shp",
+            },
+        }
+
+    def test_main_exits_when_no_input_argument(self):
+        with (
+            mock.patch.object(self.module, "load_config", return_value=self._cfg()),
+            mock.patch.object(self.module.sys, "argv", ["metadata_intersections_and_filtering.py"]),
+            mock.patch.object(self.module.os, "chdir"),
+        ):
+            with self.assertRaises(SystemExit):
+                self.module.main()
+
+    def test_main_returns_early_when_file_too_old(self):
+        cfg = self._cfg()
+        cfg["metadata_params"]["updated_after"] = "2100-01-01T00:00:00"
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["metadata_intersections_and_filtering.py", "/tmp/metadata_unfiltered_159-145-8.parquet"]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=946684800),
+            mock.patch.object(self.module, "layer_intersections") as layer_mock,
+        ):
+            self.module.main()
+
+        layer_mock.assert_not_called()
+
+    def test_main_parses_tile_from_non_prefixed_filename_branch(self):
+        cfg = self._cfg()
+        cfg["metadata_params"]["updated_after"] = "2100-01-01T00:00:00"
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["metadata_intersections_and_filtering.py", "/tmp/abc_def_ghi_159-145-8.parquet"]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=946684800),
+            mock.patch.object(self.module, "layer_intersections") as layer_mock,
+        ):
+            self.module.main()
+
+        layer_mock.assert_not_called()
+
+    def test_main_retries_intersections_until_success(self):
+        cfg = self._cfg()
+        metadata_path = "/tmp/metadata_unfiltered_159-145-8.parquet"
+
+        calls = []
+
+        def fake_intersections(*args, **kwargs):
+            calls.append(args)
+            return len(calls) >= 2
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/root"):
+                return True
+            return False
+
+        def fake_isdir(path):
+            return True
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["metadata_intersections_and_filtering.py", metadata_path]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os.path, "isdir", side_effect=fake_isdir),
+            mock.patch.object(self.module.os, "listdir", side_effect=lambda p: ["tile=159-145-8"] if str(p).replace("\\", "/").endswith("/tmp/root") else ["metadata_unfiltered_159-145-8.parquet"]),
+            mock.patch.object(self.module, "layer_intersections", return_value=["/tmp/ghsl.parquet", "/tmp/africa.parquet", "/tmp/country.parquet"]),
+            mock.patch.object(self.module, "intersections_with_metadata", side_effect=fake_intersections),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(calls), 2)
+
+    def test_main_ignores_non_directory_entries_in_root_scan(self):
+        cfg = self._cfg()
+        metadata_path = "/tmp/metadata_unfiltered_159-145-8.parquet"
+        calls = []
+
+        def fake_intersections(*args, **kwargs):
+            calls.append(args)
+            return True
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/root"):
+                return True
+            return False
+
+        def fake_isdir(path):
+            norm = str(path).replace("\\", "/")
+            return norm.endswith("/tmp/root/tile=159-145-8")
+
+        def fake_listdir(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/root"):
+                return ["not_a_dir.txt", "tile=159-145-8"]
+            if norm.endswith("/tmp/root/tile=159-145-8"):
+                return ["metadata_unfiltered_159-145-8.parquet"]
+            return []
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["metadata_intersections_and_filtering.py", metadata_path]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os.path, "isdir", side_effect=fake_isdir),
+            mock.patch.object(self.module.os, "listdir", side_effect=fake_listdir),
+            mock.patch.object(self.module, "layer_intersections", return_value=["/tmp/ghsl.parquet", "/tmp/africa.parquet", "/tmp/country.parquet"]),
+            mock.patch.object(self.module, "intersections_with_metadata", side_effect=fake_intersections),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(calls), 1)
+
+    def test_main_handles_empty_first_directory_without_index_error(self):
+        cfg = self._cfg()
+        metadata_path = "/tmp/metadata_unfiltered_159-145-8.parquet"
+        calls = []
+
+        def fake_intersections(*args, **kwargs):
+            calls.append(args)
+            return True
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            return norm.endswith("/tmp/root")
+
+        def fake_isdir(path):
+            norm = str(path).replace("\\", "/")
+            return norm.endswith("/tmp/root/tile=empty") or norm.endswith("/tmp/root/tile=159-145-8")
+
+        def fake_listdir(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/root"):
+                return ["tile=empty", "tile=159-145-8"]
+            if norm.endswith("/tmp/root/tile=empty"):
+                return []
+            if norm.endswith("/tmp/root/tile=159-145-8"):
+                return ["metadata_unfiltered_159-145-8.parquet"]
+            return []
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["metadata_intersections_and_filtering.py", metadata_path]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os.path, "isdir", side_effect=fake_isdir),
+            mock.patch.object(self.module.os, "listdir", side_effect=fake_listdir),
+            mock.patch.object(self.module, "layer_intersections", return_value=["/tmp/ghsl.parquet", "/tmp/africa.parquet", "/tmp/country.parquet"]),
+            mock.patch.object(self.module, "intersections_with_metadata", side_effect=fake_intersections),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(calls), 1)
+
+    def test_main_logs_failure_after_all_retry_attempts(self):
+        cfg = self._cfg()
+        metadata_path = "/tmp/metadata_unfiltered_159-145-8.parquet"
+        calls = []
+
+        def fake_intersections(*args, **kwargs):
+            calls.append(1)
+            return False
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            return norm.endswith("/tmp/root")
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["metadata_intersections_and_filtering.py", metadata_path]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os.path, "isdir", return_value=True),
+            mock.patch.object(self.module.os, "listdir", side_effect=lambda p: ["tile=159-145-8"] if str(p).replace("\\", "/").endswith("/tmp/root") else ["metadata_unfiltered_159-145-8.parquet"]),
+            mock.patch.object(self.module, "layer_intersections", return_value=["/tmp/ghsl.parquet", "/tmp/africa.parquet", "/tmp/country.parquet"]),
+            mock.patch.object(self.module, "intersections_with_metadata", side_effect=fake_intersections),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.time, "sleep") as sleep_mock,
+        ):
+            self.module.main()
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_main_exits_when_tile_cannot_be_extracted_from_filename(self):
+        cfg = self._cfg()
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["metadata_intersections_and_filtering.py", "/tmp/metadata_invalid.parquet"]),
+            mock.patch.object(self.module.os, "chdir"),
+        ):
+            with self.assertRaises(SystemExit):
+                self.module.main()
 

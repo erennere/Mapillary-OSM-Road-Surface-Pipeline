@@ -212,3 +212,152 @@ class FindOsmSegmentsTests(unittest.TestCase):
         self.assertEqual(len(connection.execute_calls), 2)
         self.assertTrue(connection.closed)
         remove_mock.assert_called_once_with(f"temp_{temp_suffix}.db")
+
+
+class FindOsmSegmentsMainTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_find_osm_segments_module()
+
+    def _cfg(self):
+        return {
+            "params": {
+                "earth_radius": 6371008,
+                "zoom_level": 8,
+                "distance_threshold": 20,
+            },
+            "paths": {
+                "unfiltered_metadata_dir": "/tmp/unfiltered",
+                "osm_partitioned_dir": "/tmp/osm",
+                "osm_intersections_dir": "/tmp/intersections",
+            },
+            "metadata_params": {"updated_after": "2000-01-01T00:00:00"},
+        }
+
+    def test_main_exits_when_no_input_argument(self):
+        with (
+            mock.patch.object(self.module, "load_config", return_value=self._cfg(), create=True),
+            mock.patch.object(self.module.sys, "argv", ["find_osm_segments.py"]),
+            mock.patch.object(self.module.os, "chdir"),
+        ):
+            with self.assertRaises(SystemExit):
+                self.module.main()
+
+    def test_main_skips_old_metadata_file(self):
+        cfg = self._cfg()
+        cfg["metadata_params"]["updated_after"] = "2100-01-01T00:00:00"
+        filename = "metadata_unfiltered_159-145-8_part.parquet"
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg, create=True),
+            mock.patch.object(self.module.sys, "argv", ["find_osm_segments.py", filename]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=946684800),
+            mock.patch.object(self.module, "calculate_distance") as calc_mock,
+        ):
+            self.module.main()
+
+        calc_mock.assert_not_called()
+
+    def test_main_processes_each_osm_file_for_recent_metadata(self):
+        filename = "metadata_unfiltered_159-145-8_part.parquet"
+        calls = []
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            return not norm.endswith("/tmp/intersections/tile=159-145-8")
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=self._cfg(), create=True),
+            mock.patch.object(self.module.sys, "argv", ["find_osm_segments.py", filename]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os.path, "isdir", return_value=True),
+            mock.patch.object(self.module.os, "makedirs") as makedirs_mock,
+            mock.patch.object(self.module.os, "listdir", return_value=["a.parquet", "b.parquet", "x.txt"]),
+            mock.patch.object(self.module, "calculate_distance", side_effect=lambda *a, **k: calls.append((a, k))),
+        ):
+            self.module.main()
+
+        makedirs_mock.assert_called_once()
+        self.assertEqual(len(calls), 2)
+
+    def test_main_extracts_tile_from_filename_without_suffix(self):
+        filename = "metadata_unfiltered_159-145-8.parquet"
+        calls = []
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/unfiltered/tile=159-145-8/metadata_unfiltered_159-145-8.parquet"):
+                return True
+            return not norm.endswith("/tmp/intersections/tile=159-145-8")
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=self._cfg(), create=True),
+            mock.patch.object(self.module.sys, "argv", ["find_osm_segments.py", filename]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os.path, "isdir", return_value=True),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.os, "listdir", return_value=["a.parquet"]),
+            mock.patch.object(self.module, "calculate_distance", side_effect=lambda *a, **k: calls.append((a, k))),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("tile=159-145-8", calls[0][0][2].replace("\\", "/"))
+
+    def test_main_returns_when_metadata_input_file_missing(self):
+        filename = "metadata_unfiltered_159-145-8.parquet"
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/unfiltered/tile=159-145-8/metadata_unfiltered_159-145-8.parquet"):
+                return False
+            return True
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=self._cfg(), create=True),
+            mock.patch.object(self.module.sys, "argv", ["find_osm_segments.py", filename]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os.path, "getmtime") as mtime_mock,
+            mock.patch.object(self.module, "calculate_distance") as calc_mock,
+        ):
+            self.module.main()
+
+        calc_mock.assert_not_called()
+        mtime_mock.assert_not_called()
+
+    def test_main_returns_when_osm_directory_missing(self):
+        filename = "metadata_unfiltered_159-145-8.parquet"
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/unfiltered/tile=159-145-8/metadata_unfiltered_159-145-8.parquet"):
+                return True
+            return True
+
+        def fake_isdir(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/osm/tile=159-145-8"):
+                return False
+            return True
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=self._cfg(), create=True),
+            mock.patch.object(self.module.sys, "argv", ["find_osm_segments.py", filename]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os.path, "isdir", side_effect=fake_isdir),
+            mock.patch.object(self.module.os.path, "getmtime") as mtime_mock,
+            mock.patch.object(self.module.os, "listdir") as listdir_mock,
+            mock.patch.object(self.module, "calculate_distance") as calc_mock,
+        ):
+            self.module.main()
+
+        calc_mock.assert_not_called()
+        listdir_mock.assert_not_called()
+        mtime_mock.assert_not_called()

@@ -1,4 +1,5 @@
 import importlib
+import runpy
 import random
 import sys
 import types
@@ -38,6 +39,15 @@ class FakeGeoDataFrame:
 
     def __len__(self):
         return len(self._features)
+
+    def drop_duplicates(self, subset=None, inplace=False):
+        return self
+
+    def reset_index(self, drop=False, inplace=False):
+        return self
+
+    def to_file(self, path, driver=None):
+        self._cols.setdefault("_saved", []).append((path, driver))
 
     def iterrows(self):
         return enumerate(self._features)
@@ -234,3 +244,229 @@ class GetLinestringsFromTilesTests(unittest.TestCase):
 
         self.assertIsNone(result_gdf)
         self.assertIsNotNone(result_failed)
+
+
+class GetLinestringsMainTests(unittest.TestCase):
+    def _cfg(self):
+        return {
+            "metadata_params": {"retries": 2},
+            "params": {"zoom_level": 8, "mly_key": "k"},
+            "paths": {
+                "tiles_save_dir": "/tmp/tiles",
+                "completed_tiles_dir": "/tmp/completed",
+                "failed_tiles_dir": "/tmp/failed",
+            },
+        }
+
+    def _fake_modules(self, read_file_fn):
+        fake_requests = types.ModuleType("requests")
+        fake_vt2geojson = types.ModuleType("vt2geojson")
+        fake_vt2geojson_tools = types.ModuleType("vt2geojson.tools")
+        fake_vt2geojson_tools.vt_bytes_to_geojson = lambda *args: []
+        fake_geopandas = types.ModuleType("geopandas")
+        fake_geopandas.GeoDataFrame = FakeGeoDataFrame
+        fake_geopandas.read_file = read_file_fn
+        fake_pandas = types.ModuleType("pandas")
+        fake_pandas.DataFrame = lambda *args, **kwargs: None
+        fake_pandas.concat = lambda frames, **kwargs: frames[0] if frames else None
+        fake_tqdm = types.ModuleType("tqdm")
+        fake_tqdm.tqdm = lambda iterable, **kwargs: iterable
+        fake_start = types.ModuleType("start")
+        fake_start.load_config = lambda path=None: self._cfg()
+        return {
+            "requests": fake_requests,
+            "vt2geojson": fake_vt2geojson,
+            "vt2geojson.tools": fake_vt2geojson_tools,
+            "geopandas": fake_geopandas,
+            "pandas": fake_pandas,
+            "tqdm": fake_tqdm,
+            "start": fake_start,
+        }
+
+    def test_main_creates_directories_and_handles_empty_tile_list(self):
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            return not (norm.endswith("/tmp/tiles") or norm.endswith("/tmp/completed") or norm.endswith("/tmp/failed"))
+
+        with (
+            mock.patch.dict(sys.modules, self._fake_modules(lambda _p: None)),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", side_effect=fake_exists),
+            mock.patch("os.makedirs") as makedirs_mock,
+            mock.patch("os.listdir", return_value=["other.txt"]),
+        ):
+            runpy.run_module("get_linestrings_from_tiles", run_name="__main__")
+
+        self.assertGreaterEqual(makedirs_mock.call_count, 3)
+
+    def test_main_continues_when_read_file_raises(self):
+        with (
+            mock.patch.dict(sys.modules, self._fake_modules(lambda _p: (_ for _ in ()).throw(RuntimeError("boom")))),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.listdir", return_value=["tiles_z8.gpkg"]),
+        ):
+            runpy.run_module("get_linestrings_from_tiles", run_name="__main__")
+
+    def test_main_writes_both_completed_and_failed_outputs_when_both_exist(self):
+        class MainGeoDf(FakeGeoDataFrame):
+            saved_paths = []
+
+            def __init__(self, features=None, columns=None, geometry=None, **kwargs):
+                if hasattr(features, "rows"):
+                    features = features.rows
+                super().__init__(features=features, columns=columns)
+
+            @staticmethod
+            def from_features(features):
+                return MainGeoDf(features)
+
+            def to_file(self, path, driver=None):
+                MainGeoDf.saved_paths.append((path, driver))
+
+        fake_requests = types.ModuleType("requests")
+
+        class Resp200:
+            status_code = 200
+            content = b"ok"
+
+        class Resp500:
+            status_code = 500
+            content = b"bad"
+
+        fake_requests_calls = {"n": 0}
+
+        def fake_get(url, timeout=10):
+            fake_requests_calls["n"] += 1
+            return Resp200() if fake_requests_calls["n"] == 1 else Resp500()
+
+        fake_requests.get = fake_get
+
+        fake_vt2geojson = types.ModuleType("vt2geojson")
+        fake_vt2geojson_tools = types.ModuleType("vt2geojson.tools")
+        fake_vt2geojson_tools.vt_bytes_to_geojson = lambda *args: [{"type": "Feature"}]
+
+        fake_geopandas = types.ModuleType("geopandas")
+        fake_geopandas.GeoDataFrame = MainGeoDf
+        fake_geopandas.read_file = lambda _p: MainGeoDf([{"x": 1, "y": 2, "z": 8}, {"x": 3, "y": 4, "z": 8}])
+
+        class FakeDf:
+            def __init__(self, rows=None):
+                self.rows = rows or []
+
+            def reset_index(self, drop=True):
+                return self
+
+        fake_pandas = types.ModuleType("pandas")
+        fake_pandas.DataFrame = lambda rows, columns=None: FakeDf(rows)
+        fake_pandas.concat = lambda frames, **kwargs: frames[0] if frames else MainGeoDf([])
+
+        fake_tqdm = types.ModuleType("tqdm")
+        fake_tqdm.tqdm = lambda iterable, **kwargs: iterable
+
+        fake_start = types.ModuleType("start")
+        fake_start.load_config = lambda path=None: self._cfg()
+
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "requests": fake_requests,
+                    "vt2geojson": fake_vt2geojson,
+                    "vt2geojson.tools": fake_vt2geojson_tools,
+                    "geopandas": fake_geopandas,
+                    "pandas": fake_pandas,
+                    "tqdm": fake_tqdm,
+                    "start": fake_start,
+                },
+            ),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.listdir", return_value=["tiles_z8.gpkg"]),
+        ):
+            MainGeoDf.saved_paths = []
+            runpy.run_module("get_linestrings_from_tiles", run_name="__main__")
+
+        saved_normalized = [p[0].replace("\\", "/") for p in MainGeoDf.saved_paths]
+        self.assertTrue(any("/tmp/completed/finished_tiles_z8.gpkg" in p for p in saved_normalized))
+        self.assertTrue(any("/tmp/failed/failed_tiles_z8.gpkg" in p for p in saved_normalized))
+
+    def test_main_deduplicates_failed_tiles_with_existing_xyz_columns(self):
+        class StrictGeoDf(FakeGeoDataFrame):
+            saved_paths = []
+
+            def __init__(self, features=None, columns=None, geometry=None, **kwargs):
+                if hasattr(features, "rows"):
+                    features = features.rows
+                super().__init__(features=features, columns=columns or ["x", "y", "z", "geometry"])
+
+            @staticmethod
+            def from_features(features):
+                return StrictGeoDf(features)
+
+            def drop_duplicates(self, subset=None, inplace=False):
+                if subset is not None:
+                    for col in subset:
+                        if col not in self.columns:
+                            raise AssertionError(f"Unexpected subset column: {col}")
+                return self
+
+            def to_file(self, path, driver=None):
+                StrictGeoDf.saved_paths.append((path, driver))
+
+        fake_requests = types.ModuleType("requests")
+
+        class Resp500:
+            status_code = 500
+            content = b"bad"
+
+        fake_requests.get = lambda url, timeout=10: Resp500()
+
+        fake_vt2geojson = types.ModuleType("vt2geojson")
+        fake_vt2geojson_tools = types.ModuleType("vt2geojson.tools")
+        fake_vt2geojson_tools.vt_bytes_to_geojson = lambda *args: []
+
+        fake_geopandas = types.ModuleType("geopandas")
+        fake_geopandas.GeoDataFrame = StrictGeoDf
+        fake_geopandas.read_file = lambda _p: StrictGeoDf([{"x": 1, "y": 2, "z": 8}])
+
+        class FakeDf:
+            def __init__(self, rows=None):
+                self.rows = rows or []
+
+            def reset_index(self, drop=True):
+                return self
+
+        fake_pandas = types.ModuleType("pandas")
+        fake_pandas.DataFrame = lambda rows, columns=None: FakeDf(rows)
+        fake_pandas.concat = lambda frames, **kwargs: frames[0] if frames else StrictGeoDf([])
+
+        fake_tqdm = types.ModuleType("tqdm")
+        fake_tqdm.tqdm = lambda iterable, **kwargs: iterable
+
+        fake_start = types.ModuleType("start")
+        fake_start.load_config = lambda path=None: self._cfg()
+
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "requests": fake_requests,
+                    "vt2geojson": fake_vt2geojson,
+                    "vt2geojson.tools": fake_vt2geojson_tools,
+                    "geopandas": fake_geopandas,
+                    "pandas": fake_pandas,
+                    "tqdm": fake_tqdm,
+                    "start": fake_start,
+                },
+            ),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.listdir", return_value=["tiles_z8.gpkg"]),
+        ):
+            StrictGeoDf.saved_paths = []
+            runpy.run_module("get_linestrings_from_tiles", run_name="__main__")
+
+        saved_normalized = [p[0].replace("\\", "/") for p in StrictGeoDf.saved_paths]
+        self.assertTrue(any("/tmp/failed/failed_tiles_z8.gpkg" in p for p in saved_normalized))

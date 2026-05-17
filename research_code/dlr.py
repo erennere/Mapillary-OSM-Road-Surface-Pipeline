@@ -18,7 +18,7 @@ def download_and_process_tile(row, mly_key, retries=3):
     attempt = 0
     while attempt < retries:
         try:
-            r = requests.get(url)
+            r = requests.get(url, timeout=10)
             assert r.status_code == 200, r.content
             vt_content = r.content
             features = vt2geojson_tools.vt_bytes_to_geojson(vt_content, x, y, z)

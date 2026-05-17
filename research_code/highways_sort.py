@@ -156,35 +156,21 @@ def filter_and_copy_file(osm_filepath, saving_filedir, zoom_level, continent_fil
         conn.create_function("finding_tiles_list_for_urban_areas", finding_tiles_list_for_urban_areas, ['varchar','double'], 'varchar[]')
         logger.debug("Registered custom tile-finding function")
         
+        success = False
         for attempt in range(retries):
             try:
                 logger.debug(f"Executing filter query (attempt {attempt+1}/{retries})")
-                #logger.warning(conn.execute(f"""
-                #                            SELECT * REPLACE (ST_AStext(geometry) as geometry)
-                #                            """).df().head())        
-                logging.warning(conn.execute(f"""
-                                             SELECT 
-                                                contrib_id, country_iso_a3, osm_type, osm_id,
-                                                tags, tags['highway'][1] AS osm_tags_highway,
-                                                tags['surface'][1] AS osm_tags_surface,
-                                                geometry,geometry_type,
-                                                --ST_GeomFromWKB(geometry) as geometry, 
-                                                length, centroid, bbox, xzcode
-                                            FROM (SELECT * FROM read_parquet('{osm_filepath}') WHERE tags['highway'][1] IS NOT NULL LIMIT 1000)
-                                            WHERE 1=1
-                                                  AND tags['highway'][1] IS NOT NULL
-                                            --    AND geometry_type = 'LineString'
-                                            --    AND latest = TRUE
-                                            --    AND visible = TRUE
-                                            ORDER BY xzcode.code""").df().geometry_type)
+                # FIX [D-2]: Execute only the intended copy query inside retries.
                 conn.execute(query)
                 logger.info(f"Successfully filtered and copied: {os.path.basename(osm_filepath)}")
                 sys.stdout.flush()
+                success = True
                 break
             except Exception as err:
                 logger.warning(f"Attempt {attempt+1}/{retries} failed: {err}")
                 time.sleep(sleep_time)
-        return True
+        # FIX [D-1]: Return failure when all retry attempts fail.
+        return success
     except Exception as err:
         logger.error(f"Error during extraction: {osm_filepath}: {err}", exc_info=True)
         sys.stdout.flush()
@@ -242,8 +228,13 @@ def process_single_tile(tile, saving_dir, osm_dir, zoom_level, chunk_size=500000
             except Exception as err:
                 logger.warning(f"Attempt {attempt+1}/{retries} failed: {err}")
                 time.sleep(sleep_time)
-        
-        if total_rows is None or total_rows == 0:
+
+        # FIX [D-1]: Retry exhaustion on row counting is a hard failure, not success.
+        if total_rows is None:
+            logger.error(f"Failed to count rows for tile {tile} after {retries} attempts")
+            return False
+
+        if total_rows == 0:
             logger.warning(f"No data found for tile {tile}")
             return True
 
@@ -261,15 +252,23 @@ def process_single_tile(tile, saving_dir, osm_dir, zoom_level, chunk_size=500000
             TO '{outfile}'
             (FORMAT 'parquet', COMPRESSION 'zstd');
             """
+            chunk_written = False
             for attempt in range(retries):
                 try:
                     logger.debug(f"Writing chunk {chunk_idx} for tile {tile} (attempt {attempt+1}/{retries})")
                     conn.execute(query)
                     logger.debug(f"Successfully wrote chunk {chunk_idx}: {os.path.basename(outfile)}")
+                    chunk_written = True
                     break
                 except Exception as err:
                     logger.warning(f"Attempt {attempt+1}/{retries} failed: {err}")
                     time.sleep(sleep_time)
+
+            # FIX [D-1]: Stop and report failure if a chunk cannot be written after all retries.
+            if not chunk_written:
+                logger.error(f"Failed to write chunk {chunk_idx} for tile {tile} after {retries} attempts")
+                return False
+
             offset += chunk_size
             chunk_idx += 1
         
@@ -430,10 +429,12 @@ def main():
         'retries' : cfg['metadata_params']['retries'],
         'sleep_time' :  cfg['metadata_params']['sleep_time']
     }
-    max_workers = cfg['metadata_params']['max_workers']
+    max_workers = max(1, int(cfg['metadata_params']['max_workers']))
     logger.debug(f"Processing args: chunk_size={args['chunk_size']}, max_workers={max_workers}")
     
     continent_filename = cfg['filenames']['continents_filename']
+    # FIX [B-1]: Use resolved filepath for downstream parquet reads.
+    continent_filepath = os.path.abspath(continent_filename)
     overture_url = cfg['filenames']['overture_url']
     country_filename = cfg['filenames']['country_filename']
     ghsl_filename = cfg['filenames']['ghsl_filename']
@@ -454,7 +455,7 @@ def main():
         (
             f, f==filenames[0],
             ohsome_osm_dir, osm_saving_dir, continents_dir, processed_dir,
-            zoom_level, continent_filename, country_filepath,
+            zoom_level, continent_filepath, country_filepath,
             continent_filename, country_filename,
             overture_url, ghsl_filename, africapolis_filename,
             args['retries'], args['sleep_time']

@@ -1,4 +1,5 @@
 import importlib
+import os
 import random
 import sys
 import types
@@ -18,10 +19,33 @@ def import_statistics_aggregation_module():
         sys.modules.pop(mod, None)
 
     fake_duckdb = types.ModuleType("duckdb")
+    fake_duckdb.connect = lambda *args, **kwargs: None
     fake_numpy = types.ModuleType("numpy")
     fake_pandas = types.ModuleType("pandas")
-    fake_pandas.DataFrame = None  # placeholder
-    fake_pandas.Series = None     # placeholder
+
+    class _FakeDataFrame:
+        pass
+
+    class _FakeSeries(list):
+        def __init__(self, data=None):
+            if data is None:
+                values = []
+            elif hasattr(data, "_countries"):
+                values = list(data._countries)
+            elif isinstance(data, (list, tuple, set)):
+                values = list(data)
+            else:
+                values = [data]
+            super().__init__(values)
+
+        def dropna(self):
+            return _FakeSeries([value for value in self if value is not None])
+
+        def unique(self):
+            return list(dict.fromkeys(self))
+
+    fake_pandas.DataFrame = _FakeDataFrame
+    fake_pandas.Series = _FakeSeries
     fake_mercantile = types.ModuleType("mercantile")
     fake_mercantile.bounds = lambda x, y, z: (x, y, x + 1, y + 1)
     fake_shapely = types.ModuleType("shapely")
@@ -143,7 +167,8 @@ class BuildRuntimeConfigTests(unittest.TestCase):
         result = self.module.build_runtime_config(cfg)
 
         self.assertIn("results_dir", result)
-        self.assertIn(stats_dir, result["results_dir"])
+        expected_suffix = os.path.normpath(os.path.join(stats_dir, "geographic_layers"))
+        self.assertTrue(os.path.normpath(result["results_dir"]).endswith(expected_suffix))
         self.assertEqual(result["max_workers"], max_workers)
         self.assertEqual(result["memory_limit_gb"], mem_limit)
         self.assertIn(continents_file, result["continent_layer"])
@@ -184,6 +209,37 @@ class BuildRuntimeConfigTests(unittest.TestCase):
         result = self.module.build_runtime_config(cfg)
 
         self.assertEqual(result["sub_threads"], n_cpus // max_workers)
+
+    def test_build_runtime_config_normalizes_zero_max_workers_to_one(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/s",
+                "osm_saving_dir": "/tmp/o",
+                "processed_dir": "/tmp/p",
+                "continents_dir": "/tmp/c",
+            },
+            "filenames": {
+                "continents_filename": "c.parquet",
+                "country_filename": "co.parquet",
+                "ghsl_filename": "g.gpkg",
+                "africapolis_filename": "a.shp",
+                "overture_url": "s3://bucket",
+            },
+            "statistics": {
+                "aggregation": {
+                    "max_workers": 0,
+                    "number_of_cpus": 8,
+                }
+            },
+            "geographic_layers": {
+                "urban_area_layers": []
+            },
+        }
+
+        result = self.module.build_runtime_config(cfg)
+
+        self.assertEqual(result["max_workers"], 1)
+        self.assertEqual(result["sub_threads"], 8)
 
 
 class BuildQueriesTests(unittest.TestCase):
@@ -517,3 +573,408 @@ class ProcessUrbanAreasTests(unittest.TestCase):
         self.assertIn(input_fp, q)
         self.assertIn(output_fp, q)
         self.assertIn(urban_fp, q)
+
+
+class OrchestrationAndMainTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_statistics_aggregation_module()
+
+    def test_orchestrate_osm_processing_skips_csv_when_no_results(self):
+        class FakeConn:
+            def close(self):
+                pass
+
+        class FakeFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self):
+                return self._value
+
+        class FakeExecutor:
+            def __init__(self, max_workers=None):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, *args):
+                return FakeFuture([])
+
+        class FakeCountries:
+            def unique(self):
+                return ["A", "B"]
+
+        class FakeCountriesDf:
+            country = FakeCountries()
+
+        fake_rng = type("Rng", (), {"shuffle": lambda self, x: None})()
+
+        with (
+            mock.patch.object(self.module.np, "random", types.SimpleNamespace(default_rng=lambda seed: fake_rng), create=True),
+            mock.patch.object(self.module.np, "array_split", side_effect=lambda arr, n: [["A"], ["B"]], create=True),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn(), FakeConn()], ["t1.db", "t2.db"])),
+            mock.patch.object(self.module, "ProcessPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "as_completed", side_effect=lambda futures: futures),
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "remove"),
+            mock.patch.object(self.module.pd, "concat", create=True) as concat_mock,
+        ):
+            self.module.orchestrate_osm_processing(
+                countries_df=FakeCountriesDf(),
+                output_filepath="/tmp/out.csv",
+                osm_file_pattern="/tmp/osm_*.parquet",
+                max_workers=2,
+                sub_threads=1,
+            )
+
+        concat_mock.assert_not_called()
+
+    def test_orchestrate_osm_processing_closes_and_removes_resources_on_future_error(self):
+        calls = {"closed": 0, "removed": []}
+
+        class FakeConn:
+            def close(self):
+                calls["closed"] += 1
+
+        class FakeFuture:
+            def result(self):
+                raise RuntimeError("worker failed")
+
+        class FakeExecutor:
+            def __init__(self, max_workers=None):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, *args):
+                return FakeFuture()
+
+        class FakeCountries:
+            def unique(self):
+                return ["A", "B"]
+
+        class FakeCountriesDf:
+            country = FakeCountries()
+
+        fake_rng = type("Rng", (), {"shuffle": lambda self, x: None})()
+
+        with (
+            mock.patch.object(self.module.np, "random", types.SimpleNamespace(default_rng=lambda seed: fake_rng), create=True),
+            mock.patch.object(self.module.np, "array_split", side_effect=lambda arr, n: [["A"], ["B"]], create=True),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn(), FakeConn()], ["t1.db", "t2.db"])),
+            mock.patch.object(self.module, "ProcessPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "as_completed", side_effect=lambda futures: futures),
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.os, "remove", side_effect=lambda p: calls["removed"].append(p)),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.module.orchestrate_osm_processing(
+                    countries_df=FakeCountriesDf(),
+                    output_filepath="/tmp/out.csv",
+                    osm_file_pattern="/tmp/osm_*.parquet",
+                    max_workers=2,
+                    sub_threads=1,
+                )
+
+        self.assertEqual(calls["closed"], 2)
+        self.assertIn("t1.db", calls["removed"])
+        self.assertIn("t2.db", calls["removed"])
+
+    def test_main_executes_queries_and_urban_processing(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": ["GHS_STAT_UCDB2015MT_GLOBE_R2019A", "AFRICAPOLIS2020"],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": ["ghsl.parquet", "africa.parquet"],
+            "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+        }
+
+        class FakeConn:
+            def __init__(self):
+                self.executed = []
+
+            def execute(self, q):
+                self.executed.append(q)
+
+            def close(self):
+                pass
+
+        fake_conn = FakeConn()
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "build_queries", return_value=["Q1", "Q2"]),
+            mock.patch.object(self.module, "create_connections", return_value=([fake_conn], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas") as urban_mock,
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: str(p).endswith("temp.db")),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            self.module.main()
+
+        self.assertEqual(fake_conn.executed, ["Q1", "Q2"])
+        urban_mock.assert_called_once()
+        remove_mock.assert_called_once_with("temp.db")
+
+    def test_main_uses_urban_areas_dir_for_urban_filepaths(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": ["GHS_STAT_UCDB2015MT_GLOBE_R2019A", "AFRICAPOLIS2020"],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": ["ghsl.parquet", "africa.parquet"],
+            "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+        }
+
+        class FakeConn:
+            def execute(self, q):
+                return None
+
+            def close(self):
+                return None
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "build_queries", return_value=[]),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas") as urban_mock,
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: str(p).endswith("temp.db")),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            self.module.main()
+
+        urban_args = urban_mock.call_args.args
+        normalized = [str(p).replace("\\", "/") for p in urban_args[4]]
+        self.assertTrue(any(p.endswith("/tmp/processed/ghsl.parquet") for p in normalized))
+        self.assertTrue(any(p.endswith("/tmp/processed/africa.parquet") for p in normalized))
+
+    def test_main_aligns_urban_columns_with_matching_input_output_files(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": ["GHS_STAT_UCDB2015MT_GLOBE_R2019A", "AFRICAPOLIS2020"],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": ["ghsl.parquet", "africa.parquet"],
+            "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+        }
+
+        class FakeConn:
+            def execute(self, _q):
+                return None
+
+            def close(self):
+                return None
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "build_queries", return_value=[]),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas") as urban_mock,
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: str(p).endswith("temp.db")),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            self.module.main()
+
+        urban_args = urban_mock.call_args.args
+        self.assertEqual(urban_args[1], ["ID_HDC_G0", "agglosID"])
+        self.assertTrue(urban_args[2][0].endswith("/urban/GHS_STAT_UCDB2015MT_GLOBE_R2019A_*.parquet"))
+        self.assertTrue(urban_args[3][0].endswith("/summary/GHS_STAT_UCDB2015MT_GLOBE_R2019A_all.parquet"))
+        self.assertTrue(urban_args[2][1].endswith("/urban/AFRICAPOLIS2020_*.parquet"))
+        self.assertTrue(urban_args[3][1].endswith("/summary/AFRICAPOLIS2020_all.parquet"))
+
+    def test_main_closes_and_removes_temp_db_when_urban_processing_raises(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": ["GHS_STAT_UCDB2015MT_GLOBE_R2019A", "AFRICAPOLIS2020"],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": ["ghsl.parquet", "africa.parquet"],
+            "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+        }
+
+        class FakeConn:
+            def __init__(self):
+                self.closed = False
+
+            def execute(self, _q):
+                return None
+
+            def close(self):
+                self.closed = True
+
+        fake_conn = FakeConn()
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "build_queries", return_value=["Q1"]),
+            mock.patch.object(self.module, "create_connections", return_value=([fake_conn], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas", side_effect=RuntimeError("boom")),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: str(p).endswith("temp.db")),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            with self.assertRaises(RuntimeError):
+                self.module.main()
+
+        self.assertTrue(fake_conn.closed)
+        remove_mock.assert_called_once_with("temp.db")
+
+    def test_main_supports_single_urban_area_without_index_error(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": ["GHS_STAT_UCDB2015MT_GLOBE_R2019A"],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": ["ghsl.parquet"],
+            "urban_layer_cols": ["ID_HDC_G0"],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+        }
+
+        class FakeConn:
+            def execute(self, _q):
+                return None
+
+            def close(self):
+                return None
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "build_queries", return_value=[]),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas") as urban_mock,
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: str(p).endswith("temp.db")),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            self.module.main()
+
+        urban_args = urban_mock.call_args.args
+        self.assertEqual(urban_args[1], ["ID_HDC_G0"])
+        self.assertEqual(len(urban_args[2]), 1)
+        self.assertEqual(len(urban_args[3]), 1)
+        self.assertTrue(urban_args[2][0].endswith("/urban/GHS_STAT_UCDB2015MT_GLOBE_R2019A_*.parquet"))
+        self.assertTrue(urban_args[3][0].endswith("/summary/GHS_STAT_UCDB2015MT_GLOBE_R2019A_all.parquet"))
+
+    def test_main_clips_mismatched_urban_lists_to_common_length(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": ["GHS_STAT_UCDB2015MT_GLOBE_R2019A", "AFRICAPOLIS2020"],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": ["ghsl.parquet"],
+            "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+        }
+
+        class FakeConn:
+            def execute(self, _q):
+                return None
+
+            def close(self):
+                return None
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "build_queries", return_value=[]),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas") as urban_mock,
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: str(p).endswith("temp.db")),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            self.module.main()
+
+        urban_args = urban_mock.call_args.args
+        self.assertTrue(urban_args[0])
+        self.assertEqual(urban_args[1], ["ID_HDC_G0"])
+        self.assertEqual(len(urban_args[2]), 1)
+        self.assertEqual(len(urban_args[3]), 1)
+        self.assertEqual(len(urban_args[4]), 1)

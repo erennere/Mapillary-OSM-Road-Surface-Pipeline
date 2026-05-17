@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import random
+import re
 from datetime import datetime
 import numpy as np
 import duckdb
@@ -138,11 +139,24 @@ def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     cfg = load_config()
 
+    # FIX [B-1]: Validate required input argument before indexing sys.argv.
+    if len(sys.argv) < 2:
+        logging.error("Usage: python get_nearest_osm_segments.py <metadata_filename>")
+        sys.exit(1)
+
     unfiltered_filename = os.path.basename(sys.argv[1])
-    tile = unfiltered_filename.split('.')[0].split('_')[-2]
+    stem_tokens = os.path.splitext(unfiltered_filename)[0].split('_')
+    tile = next((token for token in reversed(stem_tokens) if re.match(r'^\d+-\d+-\d+$', token)), None)
+    if tile is None:
+        logging.error(f"Could not extract tile id from filename: {unfiltered_filename}")
+        sys.exit(1)
 
     osm_intersected_filedir = os.path.join(cfg['paths']['osm_intersections_dir'], f'tile={tile}')
-    unfiltered_output_filedir = os.path.join(cfg['paths']['nearest_lines'], f'tile={tile}')
+    nearest_root_dir = cfg['paths'].get('osm_nearest_line_dir', cfg['paths'].get('nearest_lines'))
+    if nearest_root_dir is None:
+        logging.error("Missing output path config: expected paths.osm_nearest_line_dir or paths.nearest_lines")
+        sys.exit(1)
+    unfiltered_output_filedir = os.path.join(nearest_root_dir, f'tile={tile}')
 
     threshold1 = cfg['params']['threshold_1']
     threshold2 = cfg['params']['threshold_2']
@@ -152,7 +166,16 @@ def main():
             os.makedirs(output_filedir,exist_ok=True)
 
         updated_after = datetime.fromisoformat(cfg['metadata_params']['updated_after'])
-        mtime = datetime.fromtimestamp(os.path.getmtime(os.path.join(osm_intersected_filedir, filename))) 
+        input_filepath = os.path.join(osm_intersected_filedir, filename)
+        if not os.path.exists(input_filepath):
+            logging.warning(f"Skipping {filename}: missing input file {input_filepath}")
+            continue
+
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(input_filepath))
+        except OSError as err:
+            logging.warning(f"Skipping {filename}: could not stat input file {input_filepath}: {err}")
+            continue
         if mtime < updated_after:
             continue
     

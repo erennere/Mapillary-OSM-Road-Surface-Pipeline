@@ -98,6 +98,8 @@ def main():
     parquet_path = os.path.abspath(cfg['paths']['tile_partitioned_parquet_raw_metadata_dir'])
     updated_after = datetime.fromisoformat(cfg['csv_split_params']['updated_after'])
     tile = sys.argv[1]
+    if tile.startswith('tile='):
+        tile = tile.split('=', 1)[1]
     logging.info(f"Processing CSV to Parquet conversion for tile: {tile}")
 
     files = None

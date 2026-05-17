@@ -166,3 +166,144 @@ class ConvertCsvToParquetTests(unittest.TestCase):
             self.assertIn(col, conversion_query)
         self.assertIn("FORMAT PARQUET", conversion_query)
         self.assertIn("zstd", conversion_query)
+
+
+class CsvToParquetMainTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_csv_to_parquet_module()
+
+    def test_main_exits_with_usage_when_tile_argument_missing(self):
+        cfg = {
+            "paths": {
+                "splitted_raw_metadata_dir": "/tmp/splitted",
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/parquet",
+                "raw_metadata_dir": "/tmp/raw",
+            },
+            "csv_split_params": {"updated_after": "2000-01-01T00:00:00"},
+        }
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["csv_to_parquet.py"]),
+            mock.patch.object(self.module.os, "chdir"),
+        ):
+            with self.assertRaises(SystemExit):
+                self.module.main()
+
+    def test_main_uses_splitted_files_when_available(self):
+        cfg = {
+            "paths": {
+                "splitted_raw_metadata_dir": "/tmp/splitted",
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/parquet",
+                "raw_metadata_dir": "/tmp/raw",
+            },
+            "csv_split_params": {"updated_after": "2000-01-01T00:00:00"},
+        }
+        tile = "159-145-8"
+
+        converted = []
+
+        def fake_exists(path):
+            norm = path.replace("\\", "/")
+            if norm.endswith("/tmp/splitted"):
+                return True
+            if norm.endswith(f"/tmp/parquet/tile={tile}"):
+                return False
+            return False
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["csv_to_parquet.py", tile]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "listdir", return_value=[f"metadata_unfiltered_{tile}_part_1.csv", "missing_sequences_x.csv"]),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "convert_csv_to_parquet", side_effect=lambda i, o: converted.append((i, o))),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(converted), 1)
+        self.assertIn("/tmp/splitted", converted[0][0].replace("\\", "/"))
+        self.assertIn(f"/tmp/parquet/tile={tile}", converted[0][1].replace("\\", "/"))
+
+    def test_main_falls_back_to_raw_metadata_when_no_recent_split(self):
+        cfg = {
+            "paths": {
+                "splitted_raw_metadata_dir": "/tmp/splitted",
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/parquet",
+                "raw_metadata_dir": "/tmp/raw",
+            },
+            "csv_split_params": {"updated_after": "2100-01-01T00:00:00"},
+        }
+        tile = "160-141-8"
+        raw_file = f"metadata_unfiltered_{tile}.csv"
+
+        converted = []
+
+        def fake_exists(path):
+            norm = path.replace("\\", "/")
+            if norm.endswith("/tmp/splitted"):
+                return True
+            if norm.endswith(f"/tmp/raw/{raw_file}"):
+                return True
+            if norm.endswith(f"/tmp/parquet/tile={tile}"):
+                return False
+            return False
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["csv_to_parquet.py", tile]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "listdir", return_value=[f"metadata_unfiltered_{tile}_old.csv"]),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=946684800),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "convert_csv_to_parquet", side_effect=lambda i, o: converted.append((i, o))),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(converted), 1)
+        self.assertIn(f"/tmp/raw/{raw_file}", converted[0][0].replace("\\", "/"))
+
+    def test_main_accepts_tile_prefixed_argument_format(self):
+        cfg = {
+            "paths": {
+                "splitted_raw_metadata_dir": "/tmp/splitted",
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/parquet",
+                "raw_metadata_dir": "/tmp/raw",
+            },
+            "csv_split_params": {"updated_after": "2100-01-01T00:00:00"},
+        }
+        tile = "160-141-8"
+        tile_arg = f"tile={tile}"
+        raw_file = f"metadata_unfiltered_{tile}.csv"
+
+        converted = []
+
+        def fake_exists(path):
+            norm = path.replace("\\", "/")
+            if norm.endswith("/tmp/splitted"):
+                return True
+            if norm.endswith(f"/tmp/raw/{raw_file}"):
+                return True
+            if norm.endswith(f"/tmp/parquet/tile={tile}"):
+                return False
+            return False
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["csv_to_parquet.py", tile_arg]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "listdir", return_value=[f"metadata_unfiltered_{tile}_old.csv"]),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=946684800),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "convert_csv_to_parquet", side_effect=lambda i, o: converted.append((i, o))),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(converted), 1)
+        self.assertIn(f"/tmp/raw/{raw_file}", converted[0][0].replace("\\", "/"))
+        self.assertIn(f"/tmp/parquet/tile={tile}", converted[0][1].replace("\\", "/"))

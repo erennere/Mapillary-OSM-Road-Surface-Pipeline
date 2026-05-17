@@ -21,6 +21,7 @@ import shutil
 import random
 import time
 import logging
+import re
 import pandas as pd
 import geopandas as gpd
 import numpy as np
@@ -428,7 +429,8 @@ def intersections_with_metadata(metadata_filename, continent_filename,
             os.remove(temp_filepath)
 
 def layer_intersections(is_first, output_dir,  continents_dir, continents_filename, country_filename, overture_url, 
-                        ghsl_filename, africapolis_filename):
+                        ghsl_filename, africapolis_filename,
+                        wait_timeout_seconds=600, wait_poll_seconds=5):
     """Prepare and intersect urban layers with political boundaries.
     
     Performs one-time setup (when is_first=True):
@@ -471,6 +473,8 @@ def layer_intersections(is_first, output_dir,  continents_dir, continents_filena
             logger.info(f"Creating continents layer from shapefiles")
             logger.debug(f"Looking for continents in: {continents_dir}")
             continent_files = [f for f in os.listdir(continents_dir) if f.endswith('.geojson')]
+            if not continent_files:
+                raise FileNotFoundError(f"No .geojson continent files found in {continents_dir}")
             continents = ['africa', 'asia', 'europe', 'north_america', 'oceania', 'south_america']
             continents_gdf = []
 
@@ -540,12 +544,20 @@ def layer_intersections(is_first, output_dir,  continents_dir, continents_filena
         cond1 = urban_filepaths[0]
         cond2 = os.path.join(os.path.dirname(ghsl_filename_new), f'tmp_country_intersected_{os.path.basename(ghsl_filename_new)}')
 
+    # FIX [D-1]: Bound sync waits to avoid hanging forever if upstream jobs crash.
+    wait_started = time.monotonic()
     while not os.path.exists(cond1):
+        if time.monotonic() - wait_started > wait_timeout_seconds:
+            raise TimeoutError(f"Timed out waiting for {cond1}")
         logger.debug(f"Waiting for {os.path.basename(cond1)} to be created...")
-        time.sleep(5)
+        time.sleep(wait_poll_seconds)
+
+    # FIX [D-1]: Bound temp-cleanup wait to avoid infinite loop on stale temp files.
     while os.path.exists(cond2):
+        if time.monotonic() - wait_started > wait_timeout_seconds:
+            raise TimeoutError(f"Timed out waiting for temp cleanup: {cond2}")
         logger.debug(f"Waiting for temp file cleanup...")
-        time.sleep(5)
+        time.sleep(wait_poll_seconds)
 
     logger.info("Layer intersection complete")
     urban_filepaths.append(country_filename_new)
@@ -578,10 +590,11 @@ def main():
     
     metadata_filepath = str(sys.argv[1])
     metadata_filename = os.path.basename(metadata_filepath)
-    if metadata_filename.startswith('metadata_unfiltered_'):
-        tile = os.path.basename(metadata_filename.split("_")[2])
-    else:
-        tile = os.path.basename(metadata_filename.split("_")[3])
+    stem_tokens = os.path.splitext(metadata_filename)[0].split("_")
+    tile = next((token for token in reversed(stem_tokens) if re.match(r'^\d+-\d+-\d+$', token)), None)
+    if tile is None:
+        logger.error(f"Could not extract tile id from filename: {metadata_filename}")
+        sys.exit(1)
     logger.info(f"Processing metadata file: {metadata_filename} (tile: {tile})")
     
     is_first = False
@@ -615,9 +628,13 @@ def main():
 
     # Determine if this is the first execution (for one-time setup)
     logger.debug("Checking if this is the first execution")
-    for index, folder in enumerate([f for f in os.listdir(root) if os.path.isdir(root)]):
+    # FIX [D-1]: Check each candidate entry path, not the root path itself.
+    for index, folder in enumerate([f for f in os.listdir(root) if os.path.isdir(os.path.join(root, f))]):
         folder_filepath = os.path.join(root, folder)
-        is_first = index == 0 and metadata_filename == [f for f in os.listdir(folder_filepath) if f.endswith('.parquet')][0]
+        # FIX [C-1]: Guard against empty parquet lists to avoid IndexError on first folder.
+        parquet_files = [f for f in os.listdir(folder_filepath) if f.endswith('.parquet')]
+        # FIX [D-1]: Only compare against first parquet when one exists.
+        is_first = index == 0 and len(parquet_files) > 0 and metadata_filename == parquet_files[0]
         if is_first:
             break
     

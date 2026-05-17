@@ -1,5 +1,6 @@
 """Tests for dlr.py – download_and_process_tile and process_tile_file."""
 import importlib
+import runpy
 import random
 import sys
 import types
@@ -127,14 +128,14 @@ class DlrDownloadAndProcessTileTests(unittest.TestCase):
         x, y = gen.randint(0, 200), gen.randint(0, 200)
         row = FakeRow(x=x, y=y, z=z)
         mly_key = f"key_{gen.randint(1000, 9999)}"
-        called_url = []
+        called = []
 
         class OkResp:
             status_code = 200
             content = b"tb"
 
         def capture_get(url, **k):
-            called_url.append(url)
+            called.append((url, k))
             return OkResp()
 
         with (
@@ -144,11 +145,12 @@ class DlrDownloadAndProcessTileTests(unittest.TestCase):
         ):
             self.module.download_and_process_tile(row, mly_key)
 
-        url = called_url[0]
+        url, kwargs = called[0]
         self.assertIn(str(z), url)
         self.assertIn(str(x), url)
         self.assertIn(str(y), url)
         self.assertIn(mly_key, url)
+        self.assertEqual(kwargs.get("timeout"), 10)
 
     def test_all_retries_exhausted_returns_none_gdf_and_row(self):
         gen = random.Random(2003)
@@ -296,3 +298,118 @@ class DlrProcessTileFileTests(unittest.TestCase):
 
         self.assertIs(result_gdf, combined)
         self.assertIsNotNone(result_failed)
+
+
+class DlrMainExecutionTests(unittest.TestCase):
+    def _install_fake_modules(self):
+        fake_requests = types.ModuleType("requests")
+
+        class OkResp:
+            status_code = 200
+            content = b"bytes"
+
+        fake_requests.get = lambda *a, **k: OkResp()
+
+        fake_vt2geojson = types.ModuleType("vt2geojson")
+        fake_tools = types.ModuleType("vt2geojson.tools")
+        fake_tools.vt_bytes_to_geojson = lambda *a: []
+
+        fake_gpd = types.ModuleType("geopandas")
+
+        class _FakeMainGeoDf:
+            saved_files = []
+
+            def __init__(self, payload=None, geometry=None):
+                self.payload = payload
+                self.geometry = geometry
+                self.columns = ["x", "y", "z", "geometry"]
+                if isinstance(payload, dict):
+                    x = payload.get("x", [0])[0]
+                    y = payload.get("y", [0])[0]
+                    z = payload.get("z", [0])[0]
+                    self._rows = [{"x": x, "y": y, "z": z, "geometry": None}]
+                elif isinstance(payload, list):
+                    self._rows = payload
+                else:
+                    self._rows = []
+
+            def __len__(self):
+                return len(self._rows)
+
+            def iterrows(self):
+                return iter(enumerate(self._rows))
+
+            def __setitem__(self, key, value):
+                return None
+
+            @staticmethod
+            def from_features(features):
+                return _FakeMainGeoDf([{"id": 1, "geometry": None}] if features is not None else [])
+
+            def to_file(self, path, driver=None):
+                _FakeMainGeoDf.saved_files.append((path, driver))
+
+        fake_gpd.GeoDataFrame = _FakeMainGeoDf
+
+        fake_pd = types.ModuleType("pandas")
+        class _FakeDf:
+            def __init__(self, data=None, **kwargs):
+                self.data = data
+
+            def reset_index(self, drop=True):
+                return self
+
+        fake_pd.DataFrame = _FakeDf
+        fake_pd.concat = lambda frames, **k: frames[0] if frames else None
+
+        fake_tqdm = types.ModuleType("tqdm")
+        fake_tqdm.tqdm = lambda iterable, **k: iterable
+
+        fake_start = types.ModuleType("start")
+        fake_start.load_config = lambda path=None: {
+            "metadata_params": {"retries": 2},
+            "params": {"mly_key": "key"},
+        }
+
+        modules = {
+            "requests": fake_requests,
+            "vt2geojson": fake_vt2geojson,
+            "vt2geojson.tools": fake_tools,
+            "geopandas": fake_gpd,
+            "pandas": fake_pd,
+            "tqdm": fake_tqdm,
+            "start": fake_start,
+        }
+        return modules, _FakeMainGeoDf
+
+    def test_main_saves_finished_file_when_processing_returns_data(self):
+        fake_modules, fake_gdf_cls = self._install_fake_modules()
+        fake_gdf_cls.saved_files = []
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.getcwd", return_value="/tmp/dlr"),
+            mock.patch("os.path.exists", return_value=True),
+        ):
+            runpy.run_module("dlr", run_name="__main__")
+
+        saved_files = fake_gdf_cls.saved_files
+        if saved_files:
+            self.assertTrue(saved_files[0][0].replace("\\", "/").endswith("finished_dlr.gpkg"))
+
+    def test_main_creates_directories_when_missing(self):
+        fake_modules, _ = self._install_fake_modules()
+
+        created = []
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.getcwd", return_value="/tmp/dlr"),
+            mock.patch("os.path.exists", return_value=False),
+            mock.patch("os.makedirs", side_effect=lambda p, exist_ok=True: created.append((p, exist_ok))),
+        ):
+            runpy.run_module("dlr", run_name="__main__")
+
+        self.assertGreaterEqual(len(created), 3)

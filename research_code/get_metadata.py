@@ -135,6 +135,9 @@ def main():
     windows = cfg['metadata_params']['windows']
     max_workers = int(os.environ.get('SLURM_CPUS_PER_TASK', cfg['metadata_params']['max_workers']))
     data_dir = os.path.abspath(cfg['paths']['raw_metadata_dir'])
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir, exist_ok=True)
+        logging.info(f"Created metadata output directory: {data_dir}")
     params = {k:v for k,v in cfg['metadata_params'].items() if k in [
         'call_limit',
         'empty_data_attempts',
@@ -155,7 +158,7 @@ def main():
 
     zoom_level = cfg['params']['zoom_level']
     mly_key = cfg['params']['mly_key']
-    missing_attempts = cfg['metadata_params']['missing_attempts']
+    missing_attempts = max(1, int(cfg['metadata_params']['missing_attempts']))
     columns = cfg['metadata_columns']
     tiles_col = f'z{zoom_level}_tiles'
     tiles_filepath = os.path.abspath(os.path.join(cfg['paths']['completed_tiles_dir'], f'finished_tiles_z{zoom_level}.gpkg'))

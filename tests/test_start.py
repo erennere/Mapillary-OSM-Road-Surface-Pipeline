@@ -69,3 +69,24 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(cfg["filenames"]["empty_name"], "")
         self.assertIsNone(cfg["filenames"]["expected_null"])
 
+    def test_load_config_uses_data_dir_fallback_when_starter_dir_missing(self):
+        config_text = textwrap.dedent(
+            """
+            paths:
+              data_dir: /tmp/mapillary-data
+              processed_dir: "{data_dir}/processed"
+            filenames:
+              report_file: "{starter_dir}/report.parquet"
+              processed_file: "{processed_dir}/summary.csv"
+            """
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yaml"
+            config_path.write_text(config_text, encoding="utf-8")
+
+            cfg = load_config(str(config_path))
+
+        self.assertEqual(cfg["filenames"]["report_file"], "/tmp/mapillary-data/report.parquet")
+        self.assertEqual(cfg["filenames"]["processed_file"], "/tmp/mapillary-data/processed/summary.csv")
+

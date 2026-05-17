@@ -43,13 +43,15 @@ def load_statistics_runtime_config(cfg):
 
     selected_results_dir = os.path.join(os.path.abspath(cfg['paths'].get('stats_dir')), 'geographic_layers')
 
+    max_workers = max(1, int(geographic_cfg.get('max_workers', 8)))
+
     return {
         'osm_distance': int(geographic_cfg.get('osm_distance', 15)),
         'pred_distance': int(geographic_cfg.get('pred_distance', 10)),
         'sigma': float(geographic_cfg.get('sigma', 1)),
         'score': float(geographic_cfg.get('score', 0.8)),
         'threshold': float(geographic_cfg.get('threshold', 0.3)),
-        'max_workers': int(geographic_cfg.get('max_workers', 8)),
+        'max_workers': max_workers,
         'data_input_pattern': geographic_cfg.get('data_input_pattern', 'data_*.parquet'),
         'results_dir': selected_results_dir,
         'urban_area_layers': geographic_cfg.get(
@@ -2343,9 +2345,9 @@ def main():
         random.seed(seed)
         random.shuffle(file_dirs)
         file_dirs = file_dirs[index::instances]
-        
-        run_parallel_processing(file_dirs, cols, urban_areas, osm_input_filedir, data_input_filepath,
-                                sigma, score, threshold, results_dir, osm_distance, pred_distance, max_workers)
+    # FIX [D-1]: Execute processing in both sharded and default modes.
+    run_parallel_processing(file_dirs, cols, urban_areas, osm_input_filedir, data_input_filepath,
+                            sigma, score, threshold, results_dir, osm_distance, pred_distance, max_workers)
         
 
 if __name__ == "__main__":

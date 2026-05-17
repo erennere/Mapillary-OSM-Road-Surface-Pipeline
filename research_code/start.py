@@ -9,8 +9,8 @@ def load_config(filepath='./config.yaml'):
             return value.format(data_dir=data_dir)
         return value
     
-    processed_dir = format_path_processed_dir(cfg['paths']['processed_dir'])
-    starter_dir = format_path_processed_dir(cfg['paths']['starter_dir'])
+    processed_dir = format_path_processed_dir(cfg['paths'].get('processed_dir', data_dir))
+    starter_dir = format_path_processed_dir(cfg['paths'].get('starter_dir', data_dir))
 
     def format_path(value):
         if isinstance(value, str):
