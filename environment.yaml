@@ -4,20 +4,20 @@ channels:
 dependencies:
   - python=3.11
   - pip
-  - aiohttp
-  - duckdb
-  - gdal
-  - geopandas
-  - mercantile
-  - numpy
-  - opencv
-  - pandas
-  - pyarrow
-  - pygeodesy
-  - pytest
-  - pyyaml
-  - requests
-  - shapely
-  - tqdm
   - pip:
+      - aiohttp
+      - duckdb
+      - gdal
+      - geopandas
+      - mercantile
+      - numpy
+      - opencv-python
+      - pandas
+      - pyarrow
+      - pygeodesy
+      - pytest
+      - pyyaml
+      - requests
+      - shapely
+      - tqdm
       - vt2geojson

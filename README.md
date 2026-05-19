@@ -1,41 +1,405 @@
 # Mapillary Road Surface Pipeline
 
-Mapillary Road Surface Pipeline is a production-grade, tile-based system for accessing and processing Street View Images from Mapillary, combined with OpenStreetMap road network data. Initially developed for continent-level processing, it has evolved into a sustainable, parallelizable pipeline suitable for both local and HPC (High-Performance Computing) environments.
+## 1) Project Overview
 
-## System Architecture
+This repository implements a tile-based processing pipeline that combines Mapillary street-level metadata and OpenStreetMap (OSM) road data to compute road-surface statistics (for example paved vs. unpaved) across multiple spatial levels (z14, z8, country, continent, world). The pipeline starts from a polygon and zoom level, generates XYZ tiles, downloads Mapillary sequence lines and image metadata, converts CSV outputs to Parquet, intersects data with geographic layers, matches image points to nearby OSM segments, optionally downloads images, and then produces geographic-layer and aggregated summary statistics. The same workflow can run locally or on SLURM-based HPC using the provided shell launchers.
 
-The pipeline follows a modular, tile-based workflow that enables efficient parallel processing at each stage:
+## 2) Repository Structure
 
+```text
+mapillary_cleaned/
+├─ README.md
+├─ environment.yaml
+├─ data/
+│  ├─ images/
+│  ├─ logs/
+│  ├─ osm_data/
+│  ├─ ohsome_data/
+│  ├─ processed/
+│  │  ├─ continents/
+│  │  ├─ mapillary_metadata/
+│  │  │  ├─ hive_partitioned_raw_metadata/
+│  │  │  ├─ raw_metadata/
+│  │  │  ├─ spatial_intersections/
+│  │  │  └─ splitted_raw_metadata/
+│  │  └─ tiles/
+│  └─ starter_files/
+│     ├─ continents/
+│     └─ osm_files/
+├─ research_code/
+│  ├─ config.yaml
+│  ├─ config_utils.py
+│  ├─ start.py
+│  ├─ create_tiles.py
+│  ├─ get_linestrings_from_tiles.py
+│  ├─ get_metadata.py
+│  ├─ metadata_download.py
+│  ├─ csv_to_parquet.py
+│  ├─ metadata_intersections_and_filtering.py
+│  ├─ highways_sort.py
+│  ├─ find_osm_segments.py
+│  ├─ get_nearest_osm_segments.py
+│  ├─ image_download.py
+│  ├─ statistics_geographic_layers.py
+│  ├─ statistics_aggregation.py
+│  ├─ dlr.py
+│  ├─ get_sequences_hpc.sh
+│  ├─ get_metadata_hpc.sh
+│  ├─ split_csvs_and_to_parquet_hpc.sh
+│  ├─ spatial_intersections_and_filtering_hpc.sh
+│  ├─ highways_sort_hpc.sh
+│  ├─ find_and_get_nearest_osm_segments.sh
+│  ├─ image_download.sh
+│  ├─ statistics_geographic_layers.sh
+│  ├─ statistics_aggregation.sh
+│  └─ test.sh
+└─ tests/
+   ├─ test_create_tiles.py
+   ├─ test_csv_to_parquet.py
+   ├─ test_dlr.py
+   ├─ test_find_osm_segments.py
+   ├─ test_get_linestrings_from_tiles.py
+   ├─ test_get_metadata.py
+   ├─ test_get_nearest_osm_segments.py
+   ├─ test_highways_sort.py
+   ├─ test_image_download.py
+   ├─ test_metadata_download.py
+   ├─ test_metadata_intersections_and_filtering.py
+   ├─ test_start.py
+   ├─ test_statistics_aggregation.py
+   └─ test_statistics_geographic_layers.py
 ```
-Tiles Generation
-        ↓
-Sequence Download  
-        ↓
-Metadata Download (Parallel: 10 instances)
-        ↓
-CSV → Parquet Conversion
-        ↓
-Spatial Filtering & Classification ─────┐
-        ↓                                 ├─→ Near-OSM Matching → Image Download
-OSM Processing ────────────────────────┘
-```
 
-## Quick Start
+Key file roles:
 
-### Prerequisites
-- Python 3.11 via `environment.yaml` (recommended)
-- DuckDB with SPATIAL extension
-- GeoPandas, Shapely, Pandas, NumPy
-- Mapillary API token
-- GDAL/OGR tools
+- `research_code/config.yaml`: Single pipeline configuration source, ordered by pipeline stage.
+- `research_code/start.py`: Public config API (`load_config`, section resolution, null inheritance, runtime mapping helpers).
+- `research_code/config_utils.py`: Strict config parsing helpers (`require_path`, typed parsers, formatting resolution).
+- `research_code/metadata_download.py`: Core Mapillary sequence discovery + metadata download engine used by `get_metadata.py`.
+- `research_code/dlr.py`: Standalone utility for z14 tile fetch to `dlr.gpkg` (not part of the main orchestrated pipeline).
 
-### Basic Usage
+## 3) Environment & Dependencies
+
+Create and activate the environment:
+
 ```bash
-# Create and activate the recommended environment
 conda env create -f environment.yaml
 conda activate mapillary-road-surface-pipeline
+```
 
-# Run entire pipeline locally (auto-parallelizes)
+Primary Python dependencies from `environment.yaml`:
+
+| Package | Purpose in this repo |
+|---|---|
+| aiohttp | Async HTTP for image download and metadata networking |
+| duckdb | Core analytical engine for CSV/Parquet and SQL transformations |
+| gdal | Geospatial IO support stack |
+| geopandas | GeoDataFrame operations and spatial joins |
+| mercantile | XYZ tile generation |
+| numpy | Numeric operations (including haversine math) |
+| opencv-python | Image decode/resize/write |
+| pandas | Table processing and CSV handling |
+| pyarrow | Parquet support |
+| pygeodesy | Point simplification and distance-based filtering helpers |
+| pytest | Test runner option |
+| pyyaml | Config parsing |
+| requests | Synchronous API calls |
+| shapely | Geometry operations |
+| tqdm | Progress bars |
+| vt2geojson | Mapillary vector-tile conversion |
+
+Runtime/External requirements:
+
+- DuckDB SPATIAL extension is installed/loaded by scripts at runtime.
+- Mapillary API token is required (`params.mly_key`).
+- Bash and optionally SLURM are required for provided shell launchers.
+- Overture country polygons are downloaded on first run by the intersection stage.
+- GHSL urban layer (`GHS_UCDB_GLOBE_R2024A.gpkg`) is expected in starter files.
+- Africapolis shapefile is optional and only used when present.
+
+### Required Files Before Running
+
+`paths.data_dir` defaults to `../data` (relative to `research_code`), so scripts expect inputs under `data/`.
+
+| Type | Required | Expected path | Used by | Notes |
+|---|---|---|---|---|
+| Config | Yes | `research_code/config.yaml` | all scripts via `start.py` | Must include valid paths and parameters. |
+| API credential | Yes | `research_code/config.yaml` -> `get_linestrings_from_tiles.params.mly_key` | Mapillary download stages | Replace with your own token. |
+| Country polygons | Auto-generated if missing | `data/starter_files/overture_divisions.parquet` | `create_tiles.py`, `metadata_intersections_and_filtering.py`, `highways_sort.py`, `statistics_aggregation.py` | If absent, intersection stage downloads/creates it from Overture source. |
+| GHSL urban layer | Yes for urban tagging | `data/starter_files/GHS_UCDB_GLOBE_R2024A.gpkg` | `metadata_intersections_and_filtering.py`, `highways_sort.py`, `statistics_aggregation.py` | This is not generated by the pipeline; place it manually. |
+| Africapolis | Optional | `data/starter_files/AFRICAPOLIS2020.shp` (+ sidecar files) | same as above | Optional; used when present. Keep `.shp/.dbf/.shx/.prj` together. |
+| Continent outlines | Optional fallback input | `data/starter_files/continents/*.geojson` | helper/fallback geography handling | Repository includes continent outline GeoJSON files. |
+| OSM source parquet | Yes for OSM stages | `data/osm_data/ohsome_data/*.parquet` (or configured `ohsome_osm_dir`) | `highways_sort.py` onward | Must exist before highway sorting/matching. |
+
+### Minimal starter set by stage
+
+- To run Stage 1 to Stage 4 (`create_tiles` to `csv_to_parquet`): only `config.yaml` + valid Mapillary token are strictly required.
+- To run Stage 5 (`metadata_intersections_and_filtering`): add GHSL file under `data/starter_files/`.
+- To run Stage 6 to Stage 8 (OSM matching): add OSM parquet source under `data/osm_data/ohsome_data/` or configure `ohsome_osm_dir`.
+- To run full statistics with all urban layers: also provide Africapolis shapefile set.
+
+## 4) Configuration Reference
+
+Configuration is centralized in `research_code/config.yaml`. The 13 top-level sections are consumed in order and null values are resolved from earlier sections by `start.py`.
+
+### Section order (pipeline order)
+
+1. `create_tiles`
+2. `get_linestrings_from_tiles`
+3. `get_metadata`
+4. `metadata_download`
+5. `csv_to_parquet`
+6. `metadata_intersections_and_filtering`
+7. `highways_sort`
+8. `find_osm_segments`
+9. `get_nearest_osm_segments`
+10. `image_download`
+11. `statistics_geographic_layers`
+12. `statistics_aggregation`
+13. `dlr`
+
+### High-impact keys by section
+
+| Section | Important keys |
+|---|---|
+| create_tiles | `params.zoom_level`, `paths.data_dir` |
+| get_linestrings_from_tiles | `params.mly_key`, `metadata_params.retries` |
+| get_metadata | `metadata_params.batch_size`, `metadata_params.max_workers`, `metadata_params.missing_attempts` |
+| metadata_download | `metadata_params.query_bbox`, `metadata_params.initial_subdivisions`, `metadata_params.subdivision_factor`, `metadata_params.enable_download` |
+| csv_to_parquet | `csv_split_params.n_rows`, `csv_split_params.updated_after`, `csv_split_params.split_enabled` |
+| metadata_intersections_and_filtering | `params.urban_threshold`, `params.rural_threshold`, urban layer column names |
+| highways_sort | `metadata_params.max_workers`, `csv_split_params.n_rows` |
+| find_osm_segments | `params.earth_radius`, `params.distance_threshold` |
+| get_nearest_osm_segments | `params.threshold_1`, `params.threshold_2` |
+| image_download | `image_params.*`, `execution.mode`, `execution.num_jobs` |
+| statistics_geographic_layers | `stats_params.*`, urban layer names/columns |
+| statistics_aggregation | `stats_params.memory_limit_gb`, `stats_params.number_of_cpus`, `stats_params.max_workers` |
+| dlr | Inherits mostly from prior resolved keys |
+
+Configuration cautions:
+
+- `params.mly_key` must be a valid token and should not be committed.
+- `paths.data_dir` determines most derived output paths.
+- `metadata_params.query_bbox` currently restricts metadata discovery to configured bounds.
+- `csv_split_params.updated_after` and `metadata_params.updated_after` can skip files if set too new.
+
+## 5) Pipeline Execution Order
+
+### Main stage order
+
+| Stage | Python entrypoint | Local command | HPC launcher |
+|---|---|---|---|
+| 1 | `create_tiles.py` | `python research_code/create_tiles.py` | `bash research_code/get_sequences_hpc.sh` |
+| 2 | `get_linestrings_from_tiles.py` | `python research_code/get_linestrings_from_tiles.py` | `bash research_code/get_sequences_hpc.sh` |
+| 3 | `get_metadata.py` | `python research_code/get_metadata.py` | `bash research_code/get_metadata_hpc.sh` |
+| 4 | `csv_to_parquet.py` | `python research_code/csv_to_parquet.py <tile>` | `bash research_code/split_csvs_and_to_parquet_hpc.sh` |
+| 5 | `metadata_intersections_and_filtering.py` | `python research_code/metadata_intersections_and_filtering.py` | `bash research_code/spatial_intersections_and_filtering_hpc.sh` |
+| 6 | `highways_sort.py` | `python research_code/highways_sort.py` | `bash research_code/highways_sort_hpc.sh` |
+| 7 | `find_osm_segments.py` | `python research_code/find_osm_segments.py <metadata_parquet>` | `bash research_code/find_and_get_nearest_osm_segments.sh` |
+| 8 | `get_nearest_osm_segments.py` | `python research_code/get_nearest_osm_segments.py <metadata_parquet>` | `bash research_code/find_and_get_nearest_osm_segments.sh` |
+| 9 | `image_download.py` | `python research_code/image_download.py` | `bash research_code/image_download.sh` |
+| 10 | `statistics_geographic_layers.py` | `python research_code/statistics_geographic_layers.py` | `bash research_code/statistics_geographic_layers.sh` |
+| 11 | `statistics_aggregation.py` | `python research_code/statistics_aggregation.py` | `bash research_code/statistics_aggregation.sh` |
+
+Notes:
+
+- `metadata_download.py` is a module used by `get_metadata.py` and is not the standard top-level launcher.
+- Stages 5 and 6 operate on different inputs and can be scheduled independently once prerequisite data exists.
+- `dlr.py` is standalone and not part of the default stage chain.
+
+```mermaid
+graph TD
+    A[create_tiles.py] --> B[get_linestrings_from_tiles.py]
+    B --> C[get_metadata.py]
+    C --> D[csv_to_parquet.py]
+    D --> E[metadata_intersections_and_filtering.py]
+    D --> F[highways_sort.py]
+    E --> G[find_osm_segments.py]
+    F --> G
+    G --> H[get_nearest_osm_segments.py]
+    H --> I[image_download.py]
+    H --> J[statistics_geographic_layers.py]
+    J --> K[statistics_aggregation.py]
+```
+
+## 6) Data Flow
+
+```mermaid
+graph LR
+    S1[(starter_files: continents, GHSL, optional Africapolis)] --> T[create_tiles.py]
+    T --> D1[(tiles_z8.gpkg)]
+
+    D1 --> L[get_linestrings_from_tiles.py]
+    L --> D2[(finished_tiles_z8.gpkg)]
+    L --> D3[(failed_tiles_z8.gpkg)]
+
+    D2 --> M[get_metadata.py]
+    M --> MD[metadata_download.py]
+    MD --> D4[(raw metadata CSV)]
+    MD --> D5[(missing_sequences CSV)]
+
+    D4 --> C[csv_to_parquet.py]
+    C --> D6[(tile-partitioned raw metadata parquet)]
+
+    D6 --> I1[metadata_intersections_and_filtering.py]
+    S1 --> I1
+    I1 --> D7[(intersected unfiltered parquet)]
+    I1 --> D8[(intersected filtered parquet)]
+
+    OSMAPI([OSM source parquet]) --> H[highways_sort.py]
+    H --> D9[(hive_partitioned_osm_data)]
+
+    D7 --> F1[find_osm_segments.py]
+    D9 --> F1
+    F1 --> D10[(found_osm_segments parquet)]
+
+    D10 --> N1[get_nearest_osm_segments.py]
+    N1 --> D11[(nearest_lines parquet)]
+
+    D11 --> IMG[image_download.py]
+    IMG --> D12[(images png)]
+
+    D11 --> SG[statistics_geographic_layers.py]
+    SG --> D13[(stats/geographic_layers)]
+    D13 --> SA[statistics_aggregation.py]
+    SA --> D14[(stats/summary z14 z8 country continent world)]
+```
+
+## 7) File & Directory Layout (Runtime)
+
+Typical runtime outputs under `data`:
+
+```text
+data/
+├─ starter_files/
+│  ├─ continents/
+│  └─ osm_files/
+├─ processed/
+│  ├─ tiles/
+│  │  ├─ tiles_z8.gpkg
+│  │  ├─ completed/finished_tiles_z8.gpkg
+│  │  └─ failed/failed_tiles_z8.gpkg
+│  └─ mapillary_metadata/
+│     ├─ raw_metadata/
+│     │  ├─ metadata_unfiltered_<tile>.csv
+│     │  └─ missing_sequences_<tile>.csv
+│     ├─ splitted_raw_metadata/
+│     │  └─ metadata_unfiltered_<tile>_split_*.csv
+│     ├─ hive_partitioned_raw_metadata/
+│     │  └─ tile=<tile>/metadata_unfiltered_<tile>[_split_*].parquet
+│     └─ spatial_intersections/
+│        ├─ intersected_unfiltered_metadata/tile=<tile>/*.parquet
+│        └─ intersected_filtered_metadata/tile=<tile>/*.parquet
+├─ osm_data/
+│  ├─ hive_partitioned_osm_data/tile=<tile>/osm_highways_<tile>_*.parquet
+│  ├─ found_osm_segments/tile=<tile>/osm_*_metadata_unfiltered_<tile>.parquet
+│  └─ nearest_lines/tile=<tile>/closest_metadata_unfiltered_<tile>.parquet
+├─ images/
+│  └─ <tile>/<image_id>.png
+└─ stats/
+   ├─ geographic_layers/
+   └─ summary/
+      ├─ z14_*.parquet
+      ├─ z8_*.parquet
+      ├─ country_*.parquet
+      ├─ continent_*.parquet
+      └─ world_*.parquet
+```
+
+## 8) Step-by-Step Run Guide
+
+1. Prepare environment and token.
+
+```bash
+conda env create -f environment.yaml
+conda activate mapillary-road-surface-pipeline
+```
+
+Set `params.mly_key` in `research_code/config.yaml`.
+
+2. Generate tiles and sequence lines.
+
+```bash
+python research_code/create_tiles.py
+python research_code/get_linestrings_from_tiles.py
+```
+
+- Success indicator: `tiles_z8.gpkg` and `finished_tiles_z8.gpkg` exist.
+- Failure mode: API or geometry read errors; failed tiles are recorded in failed output.
+- Resume behavior: rerun is safe; completed outputs are reused.
+
+3. Download metadata (single-process or parallel instances 1..10).
+
+```bash
+python research_code/get_metadata.py
+# or parallel chunks
+python research_code/get_metadata.py 1
+...
+python research_code/get_metadata.py 10
+```
+
+- Success indicator: per-tile `metadata_unfiltered_*.csv` files appear.
+- Failure mode: API throttling/network interruption.
+- Resume behavior: already-downloaded sequences are skipped.
+
+4. Split CSV and convert to Parquet.
+
+```bash
+bash research_code/split_csvs_and_to_parquet_hpc.sh
+# or run converter manually per tile
+python research_code/csv_to_parquet.py <tile>
+```
+
+- Success indicator: tile-partitioned Parquet outputs are created.
+- Failure mode: malformed CSV rows or outdated timestamp filters.
+- Resume behavior: split script supports incremental progress.
+
+5. Run metadata intersections/filtering and OSM highway preparation.
+
+```bash
+python research_code/metadata_intersections_and_filtering.py
+python research_code/highways_sort.py
+```
+
+- Success indicator: intersected metadata and partitioned OSM parquet directories populated.
+- Failure mode: missing starter layers, missing OSM source files.
+- Resume behavior: timestamp and existence checks skip already processed subsets.
+
+6. Match nearest OSM segments.
+
+```bash
+python research_code/find_osm_segments.py <metadata_parquet>
+python research_code/get_nearest_osm_segments.py <metadata_parquet>
+```
+
+- Success indicator: `found_osm_segments` and `nearest_lines` parquet outputs exist.
+- Failure mode: tile mismatch between metadata and OSM partitions.
+- Resume behavior: reruns overwrite/recreate per-tile outputs.
+
+7. Optionally download images.
+
+```bash
+python research_code/image_download.py
+```
+
+- Success indicator: PNG files appear in `data/images/<tile>/`.
+- Failure mode: network timeout or invalid image URL.
+- Resume behavior: existing images are skipped.
+
+8. Build statistics.
+
+```bash
+python research_code/statistics_geographic_layers.py
+python research_code/statistics_aggregation.py
+```
+
+- Success indicator: `data/stats/geographic_layers/` and `data/stats/summary/` are produced.
+- Failure mode: missing nearest-line inputs or memory constraints.
+- Resume behavior: partial outputs can be rerun by task/shard.
+
+HPC launch alternatives:
+
+```bash
 bash research_code/get_sequences_hpc.sh
 bash research_code/get_metadata_hpc.sh
 bash research_code/split_csvs_and_to_parquet_hpc.sh
@@ -43,282 +407,53 @@ bash research_code/spatial_intersections_and_filtering_hpc.sh
 bash research_code/highways_sort_hpc.sh
 bash research_code/find_and_get_nearest_osm_segments.sh
 bash research_code/image_download.sh
-
-# Or submit to HPC cluster
-sbatch research_code/get_sequences_hpc.sh
-sbatch research_code/get_metadata_hpc.sh
-sbatch research_code/image_download.sh
-# ... etc
+bash research_code/statistics_geographic_layers.sh
+bash research_code/statistics_aggregation.sh
 ```
 
-## Data Workflow
+## 9) Known Issues & TODOs
 
-### Stage 1: Tiles & Sequences
+### Verified current issues
 
-**Scripts:** `create_tiles.py`, `get_linestrings_from_tiles.py`  
-**Automation:** `get_sequences_hpc.sh`
+1. `research_code/find_and_get_nearest_osm_segments.sh` hardcodes `PYTHON_BIN` to `/mnt/d//micromamba/envs/eren/python.exe`.
+   - Expected portable behavior: use `python` (or configurable env path).
+2. `research_code/statistics_aggregation.py` initializes config and metrics at import time (`load_config()` and metric catalog bootstrap at module scope).
+   - Impact: importing the module can trigger full config loading and side effects.
 
-- Generates XYZ-tiles at specified zoom level (default: 8)
-- Downloads sequence linestrings from Mapillary API
-- Retry logic: 3 attempts per tile
-- Output: GeoPackage files (completed & failed)
+### Applied fix markers present in code
 
-### Stage 2: Metadata Download
+- [B-1] argument validation and resolved path handling in nearest/highway scripts.
+- [C-1] tile preservation and stable metadata schema.
+- [D-1]/[D-2] retry loop correctness, flush behavior, bounded waits, failure signaling.
+- [F-1] deterministic final flushes and robust DuckDB cleanup.
+- [G-3] deterministic thread shutdown and joins.
 
-**Scripts:** `get_metadata.py`, `metadata_download.py`  
-**Automation:** `get_metadata_hpc.sh`
+### Observed structural gaps
 
-- `get_metadata.py` orchestrates tile-wise metadata jobs
-- `metadata_download.py` performs sequence discovery + metadata API downloads
-- **Parallel:** 10 deterministic tile chunks processed simultaneously
-- **Resumable:** Skips previously downloaded sequences
-- Retry logic: Configurable attempts (default: 10)
-- Output: `metadata_unfiltered_<tile>.csv` + `missing_sequences_<tile>.csv`
+- No dedicated resume orchestration for `statistics_geographic_layers.py` comparable to some earlier stages.
+- `API_MAX_RESULTS_PER_BBOX = 2000` is a hardcoded constant in metadata discovery logic.
+- `stats_params.memory_limit_gb` default in config is tuned for large HPC nodes and may be unsuitable for local machines.
 
-### Stage 3: Metadata Processing
+### TODO/FIXME/HACK scan
 
-**Scripts:** `split_csvs_and_to_parquet_hpc.sh`, `csv_to_parquet.py`
+No TODO/FIXME/HACK markers were found in repository source during audit.
 
-- **Phase 1:** Splits large CSV files (configurable chunk size, default: 500K rows)
-- **Phase 2:** Converts to Parquet format with:
-  - WKT → WKB geometry transformation (DuckDB SPATIAL)
-  - zstd compression
-  - Tile partitioning (one directory per tile)
-- **Resumable:** Continues from last completed chunk on re-run
+## 10) Contributing
 
-### Stage 4: Spatial Filtering
+Contribution checklist for adding a new pipeline stage:
 
-**Script:** `metadata_intersections_and_filtering.py`  
-**Automation:** `spatial_intersections_and_filtering_hpc.sh`
+1. Add a new script under `research_code` with a `main()` entrypoint and `if __name__ == '__main__': main()`.
+2. Add a matching section in `research_code/config.yaml` in pipeline order.
+3. Load config through `start.py` and access required keys via strict helpers (`require_path`, parser helpers).
+4. Declare new output/input directories under path config and keep path formatting deterministic.
+5. If parallel/HPC use is expected, add a matching shell launcher (`*_hpc.sh`) with clear local fallback.
+6. Add tests in `tests/test_<script>.py` using mock-based patterns already used in this repository.
+7. Avoid module-level side effects (especially config loading or expensive setup at import time).
 
-- Intersects metadata with geographic layers:
-  - Continents (one-time merge on first run)
-  - Countries (downloaded from Overture Maps)
-  - Urban areas (GHSL/Africapolis)
-- Classifies each image as urban/rural
-- Distance-based filtering:
-  - Urban: Keep if >100m apart
-  - Rural: Keep if >1000m apart
-- Output: Unfiltered & filtered tile-partitioned Parquet files
-- **Timestamp-aware:** Skips files not modified after configured date
-
-### Stage 5: OSM Processing
-
-**Script:** `highways_sort.py`  
-**Automation:** `highways_sort_hpc.sh`
-
-- Filters OSM highway data:
-  - Highway tag not NULL
-  - LineString geometries only
-  - Visible & latest versions only
-- Adds geographic context:
-  - Continent classification (spatial join)
-  - Country classification (spatial join)
-  - Zoom-level tile assignment
-- Output: Tile-partitioned highway data
-
-### Stage 6: OSM-Metadata Matching
-
-**Scripts:** `find_osm_segments.py`, `get_nearest_osm_segments.py`  
-**Automation:** `find_and_get_nearest_osm_segments.sh`
-
-- **find_osm_segments.py:** For each image point:
-  - Uses haversine distance calculation (Earth radius: 6,371,008m)
-  - Searches OSM segments within ±50m bounding box
-  - Filters to <30m distance threshold
-  - Outputs: Shortest connecting line + distance
-
-- **get_nearest_osm_segments.py:** Combines results from multiple tiles:
-  - Creates distance indices (absolute & percent difference)
-  - Resolves multi-match conflicts
-  - Configurable thresholds (default: 10m, 20m)
-
-### Stage 7: Image Download
-
-**Scripts:** `image_download.py`  
-**Automation:** `image_download.sh`
-
-- Asynchronous batched downloading (aiohttp + OpenCV)
-- Rate-limited requests with background connection replenishment
-- OpenCV image resizing
-- Resumable: Skips previously downloaded images
-- Tile-partitioned output with image IDs
-- Distributed chunk execution via shell launcher:
-  - `array` mode (HPC/SLURM array)
-  - `sequential` mode
-  - `parallel` mode
-
-## Configuration
-
-All scripts use `config.yaml`. Key settings:
-
-### Required Parameters
-```yaml
-params:
-  zoom_level: 8              # Tile zoom level (must be consistent)
-  mly_key: "your_api_token"  # Mapillary access token
-  earth_radius: 6371008      # Earth radius in meters
-  
-paths:
-  data_dir: "./data"         # Base data directory
-```
-
-### Filtering & Processing
-```yaml
-params:
-  urban_threshold: 100       # Urban distance filter (meters)
-  rural_threshold: 1000      # Rural distance filter (meters)
-  distance_threshold: 30     # OSM matching threshold (meters)
-
-metadata_params:
-  batch_size: 500
-  windows: true
-  max_workers: 8
-  missing_attempts: 10       # Retries for failed downloads
-  call_limit: 5
-  empty_data_attempts: 3
-  retries: 5
-  max_connections: 10000
-  sleep_time: 5
-  monitor_interval: 10
-  monitor_check_timeout: 10
-  write_interval: 300
-  write_check_timeout: 10
-  
-csv_split_params:
-  n_rows: 500000             # Rows per CSV chunk
-  split_enabled: true
-  updated_after: "2024-01-01" # Skip older files (optional)
-
-image_params:
-  image_size: [256, 427]
-  call_limit: 5
-  sleep_time: 5
-  allowed_connections: 10000
-  max_workers: 16
-  batch_size: 1000
-  windows: false
-  org_save_true: false
-  random_seed: 42
-
-execution:
-  mode: sequential           # array (HPC), sequential, parallel
-  num_jobs: 10               # chunks / parallel jobs
-```
-
-## Script Details
-
-### Core Python Scripts
-
-| Script | Purpose | Key Features |
-|--------|---------|--------------|
-| `create_tiles.py` | Generate XYZ tiles | Mercantile library, polygon restriction support |
-| `get_linestrings_from_tiles.py` | Download sequences | Retry logic (3x), progress tracking, HPC buffer flushing |
-| `get_metadata.py` | Tile-level metadata orchestrator | Deterministic chunking (1-10), resumable tile retries |
-| `metadata_download.py` | Sequence + metadata downloader core | Thread-safe buffering, monitoring threads, batched async requests |
-| `csv_to_parquet.py` | CSV → Parquet conversion | WKT→WKB transform, zstd compression, tile awareness |
-| `metadata_intersections_and_filtering.py` | Spatial filtering | One-time setup, urban/rural classification, distance filtering |
-| `highways_sort.py` | OSM highway enrichment | Spatial joins, geographic tagging, tile assignment |
-| `find_osm_segments.py` | Point-to-segment matching | Haversine distance, bbox search, configurable threshold |
-| `get_nearest_osm_segments.py` | Conflict resolution | Multi-match handling, distance indexing |
-| `image_download.py` | Tile image downloader | Async batch processing, rate limiting, resumable missing-image tracking |
-
-### Bash Automation Scripts
-
-| Script | Purpose | Execution |
-|--------|---------|-----------|
-| `get_sequences_hpc.sh` | Runs stages 1-2 in sequence | Local: bash / HPC: sbatch |
-| `get_metadata_hpc.sh` | Launches 10 parallel metadata instances | Local/HPC auto-detection |
-| `spatial_intersections_and_filtering_hpc.sh` | Parallelizes spatial filtering | CPU-aware local / SLURM array on HPC |
-| `highways_sort_hpc.sh` | Parallelizes OSM processing | CPU-aware local / SLURM array on HPC |
-| `find_and_get_nearest_osm_segments.sh` | Runs stages 6A-6B sequentially | Local execution |
-| `image_download.sh` | Distributed image download launcher | Supports array, sequential, and parallel modes |
-
-### Utility Scripts
-
-- **start.py** - Configuration loader with path normalization
-- **metadata_download.py** - Metadata query utility used by `get_metadata.py`
-
-## Recent Improvements & Bug Fixes
-
-- ✅ **Added:** Timestamp-based filtering in `spatial_intersections_and_filtering_hpc.sh`
-- ✅ **Added:** Comprehensive script-level docstrings
-- ✅ **Improved:** Output visibility on HPC batch systems
-
-## Known Limitations & TODOs
-
-### Current Blockers
-- [ ] HPC compatibility not fully tested on production clusters
-- [ ] OSM source currently uses local SDS intern directory (not S3-backed)
-
-### Enhancements Needed
-- [ ] Parallelize `find_osm_segments.py` via bash wrapper across partitioned folders
-- [ ] Add tracking/ID persistence from highways_sort onwards (resume capability)
-- [ ] Integrate S3/Rustfs for OSM planet source
-- [ ] Performance optimization for large-scale continent processing
-
-## Features
-
-### Production-Ready
-- ✅ Resumable execution at every stage
-- ✅ Comprehensive retry logic with exponential backoff
-- ✅ Real-time HPC logging with buffer flushing
-- ✅ Deterministic parallel tile chunking (reproducible across runs)
-- ✅ Tile-partitioned output for efficient querying
-- ✅ Configuration-driven (no hardcoded paths)
-- ✅ Local & HPC execution (auto-detection)
-
-### Robustness
-- ✅ Error handling with detailed logging (DEBUG, INFO, WARNING, ERROR)
-- ✅ Transient failure recovery (DuckDB lock/timeout handling)
-- ✅ Spatial index acceleration (STRtree for OSM matching)
-- ✅ Compression (zstd) for efficient storage
-
-## Running on HPC
-
-### SLURM Cluster (Recommended)
+Run tests with either:
 
 ```bash
-# Stack jobs with dependencies
-sbatch --job-name=tiles research_code/get_sequences_hpc.sh
-sbatch --dependency=afterok:$JOB1_ID --job-name=metadata research_code/get_metadata_hpc.sh
-sbatch --dependency=afterok:$JOB2_ID --job-name=process research_code/split_csvs_and_to_parquet_hpc.sh
-# ... etc
+pytest tests/
+# or
+python -m unittest discover -s tests/
 ```
-
-### Local Multi-Core (Auto-Parallelization)
-
-```bash
-# Automatically detects CPU count and limits parallelism
-bash research_code/spatial_intersections_and_filtering_hpc.sh
-# Running locally on 16 cores (using max 6 parallel jobs for memory efficiency)
-```
-
-## Troubleshooting
-
-### No Output on HPC
-- Scripts now include `sys.stdout.flush()` after logging statements
-- Check SLURM output files: `slurm-*.out`
-
-### Timestamp Skipping Files
-- Ensure `csv_split_params.updated_after` in `config.yaml` is less restrictive
-- Format: ISO 8601 date string (e.g., `"2024-01-01T00:00:00"`)
-
-### Distance Calculation Issues  
-- Verify `params.earth_radius` matches 6,371,008m
-- Check haversine formula: uses WKT POINT strings from database
-
-### Performance Issues
-- Reduce `metadata_params.max_workers` if memory exhausted
-- Increase `csv_split_params.n_rows` for faster conversion
-- Monitor DuckDB temp file cleanup in error cases
-
-## Contributing
-
-When modifying scripts:
-1. Add comprehensive docstrings (module + functions)
-2. Include `sys.stdout.flush()` after logging in HPC contexts
-3. Ensure resumability where applicable
-4. Test on both local and HPC environments
-5. Update this README with changes
-

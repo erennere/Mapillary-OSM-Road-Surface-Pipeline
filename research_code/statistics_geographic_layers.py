@@ -19,7 +19,7 @@ import duckdb
 from shapely import to_wkb, box
 import mercantile
 
-from start import load_config, load_statistics_runtime_config, require_path, require_section
+from start import load_config, require_path, require_section
 
 # =========================
 # Runtime configuration
