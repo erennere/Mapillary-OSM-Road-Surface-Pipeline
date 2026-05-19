@@ -994,7 +994,6 @@ def get_sequences(bbox: List[float], mly_key: str, n: int, output_dir: str, numb
         thread_stop = True
         # FIX [G-3]: Ensure all background threads are joined before returning.
         join_threads_with_timeout(started_threads, timeout=30)
-        logger.info("Sequence discovery threads stopped")
 
 
 # ============================================================================
@@ -1210,7 +1209,6 @@ def get_metadata(sequence_list: List[str], missing_sequences_file: str, metadata
         flush_missing_sequences_buffer(missing_sequences_file)
         # FIX [G-3]: Ensure all background threads are joined before returning.
         join_threads_with_timeout(started_threads, timeout=30)
-        logger.info("Metadata download threads stopped")
 
 
 # ============================================================================

@@ -2633,7 +2633,7 @@ class MetadataDownloadOrchestrationTests(unittest.TestCase):
             mock.patch.object(self.module, "ThreadPoolExecutor", side_effect=FakeExecutor),
             mock.patch.object(self.module.pd, "DataFrame", return_value=type("DF", (), {"to_csv": lambda s, *a, **k: None})(), create=True),
             mock.patch.object(self.module, "create_geodataframe_from_bboxes", return_value=FakeGeoDf()),
-            mock.patch.object(self.module.time, "time", side_effect=[10.0, 12.0]),
+            mock.patch.object(self.module.time, "time", side_effect=[10.0, 10.0, 12.0, 12.0, 12.0, 12.0]),
         ):
             self.module.get_sequences(
                 bbox=[0, 0, 2, 2],
@@ -2671,7 +2671,7 @@ class MetadataDownloadOrchestrationTests(unittest.TestCase):
             mock.patch.object(self.module, "ThreadPoolExecutor", side_effect=FakeExecutor),
             mock.patch.object(self.module, "flush_metadata_buffer"),
             mock.patch.object(self.module, "flush_missing_sequences_buffer"),
-            mock.patch.object(self.module.time, "time", side_effect=[20.0, 22.0]),
+            mock.patch.object(self.module.time, "time", side_effect=[20.0, 20.0, 22.0, 22.0, 22.0, 22.0]),
         ):
             self.module.get_metadata(
                 sequence_list=["s1"],

@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import mercantile
 from shapely import to_wkb, box
-from start import load_config, require_section
+from start import load_config, load_statistics_aggregation_runtime_config, require_section
 from statistics_geographic_layers import (
     build_metric_catalog,
     create_agg_highway_road_type_strings,
