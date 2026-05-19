@@ -10,6 +10,11 @@ The outputs are parquet datasets and image files organized by tile and aggregati
 
 At a high level: tiles are generated first, then Mapillary sequence lines are downloaded, then sequence metadata is discovered and fetched. Raw CSV metadata is split and converted to tile-partitioned parquet, then spatially intersected and filtered. In parallel with metadata spatial filtering, OSM highways are cleaned and partitioned by tile. Finally, point-to-road matching and nearest-line resolution produce analysis-ready joins, while image download and statistics stages run from their own inputs.
 
+Images will be fed into the ML pipeline, which is maintained separately from this repository. Before statistical aggregation steps can be executed, the inferred ML tags must be merged with the metadata — either the filtered metadata, the unfiltered metadata, or both. The merge script has not yet been updated, as the optimal integration strategy is still under consideration.
+
+Previously, the spatially filtered metadata was split into 100 chunks. However, this approach may no longer be necessary due to the newly introduced resumability feature in the pipeline.
+
+There is also another repository on the profile: surface-pavedness-to-hot. Since the metadata only contains POINT geometries, but potential users of this pipeline are typically accustomed to working with HOTOSM data, the repository downloads HOTOSM datasets for each country from HDX. It then either merges these datasets with the DL-OSM–enhanced, spatially filtered Mapillary metadata, or reconstructs the same data format directly from the Mapillary-derived data in cases where HOTOSM does not provide a corresponding file.
 ```mermaid
 graph TD
     subgraph A[Sequence Discovery]
