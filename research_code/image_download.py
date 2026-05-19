@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.WARNING)
 lock = threading.Lock()
 missing_images_lock = threading.Lock()
 allowed_connection_lock = threading.Lock()
-allowed_connections = 3000
+allowed_connections = 0
 allowed_connections_current = allowed_connections
 missing_images = []
 missing_image_ids = set()
@@ -395,7 +395,11 @@ def orchestrate(metadata, missing_images_file, original_dir, resized_dir,
     org_save_true = parse_bool_with_default(org_save_true, "image_download.orchestrate.org_save_true", False)
     
     # Reset global state for each orchestration run
-    allowed_connections = download_args.get('allowed_connections', 10000)
+    allowed_connections = parse_int(
+        require_path(download_args, 'allowed_connections'),
+        'download_args.allowed_connections',
+        min_value=1,
+    )
     allowed_connections_current = allowed_connections
     with missing_images_lock:
         missing_images.clear()

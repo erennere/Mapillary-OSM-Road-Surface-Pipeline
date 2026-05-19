@@ -268,6 +268,8 @@ class GetMetadataMainTests(unittest.TestCase):
     def _build_config(self):
         return {
             "metadata_params": {
+                "deterministic_seed": 42,
+                "num_chunks": 10,
                 "batch_size": 5,
                 "windows": False,
                 "max_workers": 2,

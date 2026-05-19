@@ -31,8 +31,6 @@ logging.basicConfig(
 # Constants
 number_of_jobs_running = 1
 number_of_requests = 0
-DETERMINISTIC_SEED = 42  # For reproducible tile division across instances
-NUM_CHUNKS = 10  # Always divide into 10 chunks for 10 parallel instances
 
 def process_single_tile(tile, tiles_gdf, tiles_col, data_dir, metadata_args):
     """Download and process metadata for all sequences in a single tile.
@@ -112,24 +110,32 @@ def main():
     """
     logging.info("Starting Mapillary metadata download script")
     
-    # Parse optional instance_id argument (1-10)
+    # Parse optional instance_id argument (1-num_chunks)
     instance_id = None
-    if len(sys.argv) > 1:
-        try:
-            instance_id = int(sys.argv[1])
-            if instance_id < 1 or instance_id > NUM_CHUNKS:
-                logging.warning(f"Invalid instance_id: {instance_id}. Expected 1-{NUM_CHUNKS}. Processing all tiles.")
-                instance_id = None
-            else:
-                logging.info(f"Running in parallel mode: instance {instance_id}/{NUM_CHUNKS}")
-        except ValueError:
-            logging.warning(f"Invalid instance_id argument: {sys.argv[1]}. Expected integer 1-{NUM_CHUNKS}. Processing all tiles.")
     
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     logging.debug(f"Working directory: {os.getcwd()}")
     
     cfg = load_config()
     logging.info("Configuration loaded successfully")
+
+    deterministic_seed = parse_int(
+        require_path(cfg, 'metadata_params', 'deterministic_seed'),
+        'metadata_params.deterministic_seed',
+        min_value=0,
+    )
+    num_chunks = parse_int(require_path(cfg, 'metadata_params', 'num_chunks'), 'metadata_params.num_chunks', min_value=1)
+
+    if len(sys.argv) > 1:
+        try:
+            instance_id = int(sys.argv[1])
+            if instance_id < 1 or instance_id > num_chunks:
+                logging.warning(f"Invalid instance_id: {instance_id}. Expected 1-{num_chunks}. Processing all tiles.")
+                instance_id = None
+            else:
+                logging.info(f"Running in parallel mode: instance {instance_id}/{num_chunks}")
+        except ValueError:
+            logging.warning(f"Invalid instance_id argument: {sys.argv[1]}. Expected integer 1-{num_chunks}. Processing all tiles.")
 
     batch_size = parse_int(require_path(cfg, 'metadata_params', 'batch_size'), 'metadata_params.batch_size', min_value=1)
     windows = parse_bool(require_path(cfg, 'metadata_params', 'windows'), 'metadata_params.windows')
@@ -196,12 +202,12 @@ def main():
     logging.info(f"Found {len(tiles)} tiles total")
     
     # Divide tiles into chunks using deterministic seed
-    rng = random.Random(DETERMINISTIC_SEED)
+    rng = random.Random(deterministic_seed)
     rng.shuffle(tiles)  # Shuffle with fixed seed for reproducibility
     
-    # Split into NUM_CHUNKS chunks
-    chunk_size = (len(tiles) + NUM_CHUNKS - 1) // NUM_CHUNKS  # Ceiling division
-    chunks = [tiles[i*chunk_size:(i+1)*chunk_size] for i in range(NUM_CHUNKS)]
+    # Split into num_chunks chunks
+    chunk_size = (len(tiles) + num_chunks - 1) // num_chunks  # Ceiling division
+    chunks = [tiles[i*chunk_size:(i+1)*chunk_size] for i in range(num_chunks)]
     
     if instance_id is not None:
         # Single instance processing

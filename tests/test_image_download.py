@@ -1116,7 +1116,11 @@ class ImageFetchAndSaveTests(unittest.TestCase):
             self.module.allowed_connections_current = orig_allowed
 
     def test_get_image_success_after_retry(self):
+        orig_allowed = self.module.allowed_connections
+        orig_allowed_current = self.module.allowed_connections_current
+
         async def fake_sleep(_t):
+            self.module.allowed_connections_current = 1
             return None
 
         fetch_calls = {"n": 0}
@@ -1125,36 +1129,52 @@ class ImageFetchAndSaveTests(unittest.TestCase):
             fetch_calls["n"] += 1
             return None if fetch_calls["n"] == 1 else b"data"
 
-        with (
-            mock.patch.object(self.module, "fetch_image", side_effect=fake_fetch),
-            mock.patch.object(self.module.asyncio, "sleep", side_effect=fake_sleep, create=True),
-            mock.patch.object(self.module.np, "frombuffer", return_value=[1, 2, 3]),
-            mock.patch.object(self.module.np, "ndarray", list),
-            mock.patch.object(self.module.cv2, "imdecode", return_value=[9, 9]),
-            mock.patch.object(self.module.cv2, "resize", return_value=[5, 5]),
-        ):
-            image, resized = asyncio.run(
-                self.module.get_image("http://x", (64, 64), session=object(), call_limit=3, sleep_time=1)
-            )
+        try:
+            self.module.allowed_connections = 1
+            self.module.allowed_connections_current = 1
+            with (
+                mock.patch.object(self.module, "fetch_image", side_effect=fake_fetch),
+                mock.patch.object(self.module.asyncio, "sleep", side_effect=fake_sleep, create=True),
+                mock.patch.object(self.module.np, "frombuffer", return_value=[1, 2, 3]),
+                mock.patch.object(self.module.np, "ndarray", list),
+                mock.patch.object(self.module.cv2, "imdecode", return_value=[9, 9]),
+                mock.patch.object(self.module.cv2, "resize", return_value=[5, 5]),
+            ):
+                image, resized = asyncio.run(
+                    self.module.get_image("http://x", (64, 64), session=object(), call_limit=3, sleep_time=1)
+                )
+        finally:
+            self.module.allowed_connections = orig_allowed
+            self.module.allowed_connections_current = orig_allowed_current
 
         self.assertEqual(fetch_calls["n"], 2)
         self.assertEqual(image, [9, 9])
         self.assertEqual(resized, [5, 5])
 
     def test_get_image_returns_none_when_all_attempts_fail(self):
+        orig_allowed = self.module.allowed_connections
+        orig_allowed_current = self.module.allowed_connections_current
+
         async def fake_sleep(_t):
+            self.module.allowed_connections_current = 1
             return None
 
         async def fake_fetch(_url, _session):
             return None
 
-        with (
-            mock.patch.object(self.module, "fetch_image", side_effect=fake_fetch),
-            mock.patch.object(self.module.asyncio, "sleep", side_effect=fake_sleep, create=True),
-        ):
-            image, resized = asyncio.run(
-                self.module.get_image("http://x", (64, 64), session=object(), call_limit=2, sleep_time=1)
-            )
+        try:
+            self.module.allowed_connections = 1
+            self.module.allowed_connections_current = 1
+            with (
+                mock.patch.object(self.module, "fetch_image", side_effect=fake_fetch),
+                mock.patch.object(self.module.asyncio, "sleep", side_effect=fake_sleep, create=True),
+            ):
+                image, resized = asyncio.run(
+                    self.module.get_image("http://x", (64, 64), session=object(), call_limit=2, sleep_time=1)
+                )
+        finally:
+            self.module.allowed_connections = orig_allowed
+            self.module.allowed_connections_current = orig_allowed_current
 
         self.assertIsNone(image)
         self.assertIsNone(resized)

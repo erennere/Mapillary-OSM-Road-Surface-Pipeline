@@ -149,11 +149,15 @@ Before a first full run, review at least these keys:
 | --- | --- |
 | get_linestrings_from_tiles.params.mly_key | API authentication for Mapillary requests |
 | metadata_download.metadata_params.query_bbox | geographic retrieval extent |
+| get_metadata.metadata_params.deterministic_seed | reproducible shuffling seed for metadata chunk assignment |
+| get_metadata.metadata_params.num_chunks | number of deterministic metadata chunks for parallel instances |
+| dlr.params.zoom_level | tile zoom level used by the DLR utility script |
 | create_tiles.params.zoom_level | tile granularity across stages |
 | highways_sort.paths.ohsome_osm_dir | OSM source directory |
 | find_osm_segments.params.distance_threshold | point-to-road matching tolerance |
 | get_nearest_osm_segments.params.threshold_1 | nearest-segment decision threshold (band 1) |
 | get_nearest_osm_segments.params.threshold_2 | nearest-segment decision threshold (band 2) |
+| image_download.image_params.allowed_connections | global request budget used by image download workers |
 | image_download.execution.mode | local/HPC dispatch mode |
 | image_download.execution.num_jobs | chunk/job fan-out for image retrieval |
 | statistics_geographic_layers.paths.final_filtered_dir | expected stage-8 metadata input |
@@ -167,7 +171,6 @@ The repository expects several external assets or environment-specific adjustmen
 - a valid Mapillary token,
 - OSM parquet inputs at the configured OSM path,
 - adaptation of static SLURM resource headers where needed,
-- override of the environment-specific default Python path in find_and_get_nearest_osm_segments.sh,
 - population of statistics_geographic_layers.paths.final_filtered_dir before stage 8.
 
 ## Section Documentation

@@ -6,7 +6,7 @@ from vt2geojson import tools as vt2geojson_tools
 import geopandas as gpd
 import pandas as pd
 from tqdm import tqdm
-from start import load_config, resolve_mapillary_token
+from start import load_config, parse_int, require_path, resolve_mapillary_token
 
 def download_and_process_tile(row, mly_key, retries=3):
     z = row["z"]
@@ -61,7 +61,7 @@ if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     cfg = load_config()
     retries = cfg['metadata_params']['retries']
-    zoom_level = 14
+    zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
     mly_key = resolve_mapillary_token(cfg['params']['mly_key'])
 
     tiles_save_dir = os.getcwd()
@@ -74,7 +74,7 @@ if __name__ == "__main__":
         if not os.path.exists(directory):
             os.makedirs(directory,exist_ok=True)
         
-    file = gpd.GeoDataFrame(pd.DataFrame({'x':[0], 'y':[0], 'z': [0], 'geometry':[None]}))
+    file = gpd.GeoDataFrame(pd.DataFrame({'x':[0], 'y':[0], 'z': [zoom_level], 'geometry':[None]}))
     continent_file, failed_tiles_gdf = process_tile_file(file, mly_key, retries)
     filename = 'dlr.gpkg'
     if continent_file is not None:

@@ -371,7 +371,7 @@ class DlrMainExecutionTests(unittest.TestCase):
         fake_start = types.ModuleType("start")
         fake_start.load_config = lambda path=None: {
             "metadata_params": {"retries": 2},
-            "params": {"mly_key": "key"},
+            "params": {"mly_key": "key", "zoom_level": 8},
         }
         fake_start.__getattr__ = lambda name: getattr(real_start, name)
 

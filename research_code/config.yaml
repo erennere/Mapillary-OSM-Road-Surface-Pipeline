@@ -39,6 +39,8 @@ get_metadata:
     raw_metadata_dir: "{processed_dir}/mapillary_metadata/raw_metadata"
     completed_tiles_dir: null  # resolved from 'get_linestrings_from_tiles' at runtime
   metadata_params:
+    deterministic_seed: 42
+    num_chunks: 10
     retries: null  # resolved from 'get_linestrings_from_tiles' at runtime
     batch_size: 100
     windows: true
@@ -267,5 +269,6 @@ statistics_aggregation:
 dlr:
   params:
     mly_key: null  # resolved from 'get_linestrings_from_tiles' at runtime
+    zoom_level: null  # resolved from 'create_tiles' at runtime
   metadata_params:
     retries: null  # resolved from 'get_linestrings_from_tiles' at runtime
