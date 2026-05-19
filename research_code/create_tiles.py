@@ -13,7 +13,7 @@ import logging
 import mercantile
 import geopandas as gpd
 from shapely.geometry import box
-from start import load_config
+from start import load_config, parse_int, require_path
 
 # Configure logging
 logging.basicConfig(
@@ -67,19 +67,19 @@ if __name__ == '__main__':
     cfg = load_config()
     logging.info("Configuration loaded successfully")
 
-    zoom_level = cfg['params']['zoom_level']
-    save_dir = os.path.abspath(cfg['paths']['tiles_save_dir'])
-    polygon_filename = cfg['filenames']['starter_polygon_fn']
+    zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
+    save_dir = os.path.abspath(require_path(cfg, 'paths', 'tiles_save_dir'))
+    polygon_filename = require_path(cfg, 'filenames', 'starter_polygon_fn')
     logging.debug(f"Zoom level: {zoom_level}, Save directory: {save_dir}")
 
     polygon_filename = polygon_filename if polygon_filename != '' else None
-    polygon_filepath = os.path.abspath(os.path.join(cfg['paths']['starter_dir'], polygon_filename)) if polygon_filename else None
+    starter_polygon_filepath = os.path.abspath(os.path.join(require_path(cfg, 'paths', 'starter_dir'), polygon_filename)) if polygon_filename else None
 
     # Try to load country-specific polygon
     polygon = None
     try:
-        polygon_filename = cfg['filenames']['country_filename']
-        polygon_filepath = os.path.abspath(os.path.join(cfg['paths']['starter_dir'], polygon_filename)) if polygon_filename else None
+        polygon_filename = require_path(cfg, 'filenames', 'country_filename')
+        polygon_filepath = os.path.abspath(os.path.join(require_path(cfg, 'paths', 'starter_dir'), polygon_filename))
         logging.info(f"Attempting to load polygon from {polygon_filepath}")
         polygon_data = gpd.read_parquet(polygon_filepath)
         try:
@@ -90,8 +90,19 @@ if __name__ == '__main__':
             polygon = polygon_data.geometry.values[0]
             logging.info("Loaded first available polygon geometry")
     except Exception as e:
-        logging.warning(f"Could not load polygon: {e}. Will generate tiles for entire world.")
-        polygon = None
+        logging.warning(f"Could not load country polygon: {e}")
+        if starter_polygon_filepath:
+            try:
+                logging.info(f"Attempting fallback starter polygon from {starter_polygon_filepath}")
+                polygon_data = gpd.read_parquet(starter_polygon_filepath)
+                polygon = polygon_data.geometry.values[0]
+                logging.info("Loaded starter fallback polygon geometry")
+            except Exception as starter_err:
+                logging.warning(f"Could not load starter polygon fallback: {starter_err}. Will generate tiles for entire world.")
+                polygon = None
+        else:
+            logging.warning("No starter polygon configured. Will generate tiles for entire world.")
+            polygon = None
 
     # Create output directory if it doesn't exist
     if not os.path.exists(save_dir):

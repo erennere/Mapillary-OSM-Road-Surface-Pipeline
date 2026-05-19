@@ -1,6 +1,6 @@
-# Mapillary Street View Image Processing Pipeline
+# Mapillary Road Surface Pipeline
 
-This repository provides a production-grade, tile-based system for accessing and processing Street View Images from Mapillary, combined with OpenStreetMap road network data. Initially developed for continent-level processing, it has evolved into a sustainable, parallelizable pipeline suitable for both local and HPC (High-Performance Computing) environments.
+Mapillary Road Surface Pipeline is a production-grade, tile-based system for accessing and processing Street View Images from Mapillary, combined with OpenStreetMap road network data. Initially developed for continent-level processing, it has evolved into a sustainable, parallelizable pipeline suitable for both local and HPC (High-Performance Computing) environments.
 
 ## System Architecture
 
@@ -23,7 +23,7 @@ OSM Processing ─────────────────────�
 ## Quick Start
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.11 via `environment.yaml` (recommended)
 - DuckDB with SPATIAL extension
 - GeoPandas, Shapely, Pandas, NumPy
 - Mapillary API token
@@ -31,6 +31,10 @@ OSM Processing ─────────────────────�
 
 ### Basic Usage
 ```bash
+# Create and activate the recommended environment
+conda env create -f environment.yaml
+conda activate mapillary-road-surface-pipeline
+
 # Run entire pipeline locally (auto-parallelizes)
 bash research_code/get_sequences_hpc.sh
 bash research_code/get_metadata_hpc.sh

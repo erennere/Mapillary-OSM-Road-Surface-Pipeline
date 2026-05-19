@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import mercantile
 from shapely import to_wkb, box
-from start import load_config
+from start import load_config, load_statistics_aggregation_runtime_config, require_section
 from statistics_geographic_layers import (
     build_metric_catalog,
     create_agg_highway_road_type_strings,
@@ -29,11 +29,8 @@ from statistics_geographic_layers import (
 # =========================
 # Metric catalog preparation
 # =========================
-try:
-    _BOOT_CFG = load_config()
-    _METRICS = build_metric_catalog(_BOOT_CFG.get('statistics', {}))
-except Exception:
-    _METRICS = build_metric_catalog()
+_BOOT_CFG = load_config()
+_METRICS = build_metric_catalog(require_section(_BOOT_CFG, 'statistics'))
 
 highways = _METRICS['highways']
 areas = _METRICS['areas']
@@ -926,54 +923,26 @@ def orchestrate_osm_processing(countries_df, output_filepath, osm_file_pattern, 
     except Exception as e:
         logging.warning(f"Error saving CSV: {e}")
 
-def build_runtime_config(cfg):
-    """Build runtime configuration for this script from config.yaml."""
-    stats_cfg = cfg.get('statistics', {})
-    agg_cfg = stats_cfg.get('aggregation', {})
-
-    max_workers = max(1, int(agg_cfg.get('max_workers', 16)))
-
-    config = {
-        'osm_file_pattern': cfg['paths'].get('osm_saving_dir', '*.parquet'),
-        'results_dir': os.path.join(os.path.abspath(cfg['paths'].get('stats_dir')), 'geographic_layers'),
-        'results_dir_compiled': os.path.join(os.path.abspath(cfg['paths'].get('stats_dir')), 'summary'),
-        'urban_areas_dir': cfg["paths"].get('processed_dir'),
-        'country_layer': os.path.abspath(os.path.join(cfg['paths']['processed_dir'], f"intersected_{cfg['filenames']['country_filename']}")),
-        'continent_layer': os.path.abspath(cfg['filenames']['continents_filename']),
-        'urban_layers': 
-            [
-                f"country_intersected_intersected_{cfg['filenames']['ghsl_filename'].replace('.gpkg', '.parquet')}",
-                f"country_intersected_intersected_{cfg['filenames']['africapolis_filename'].replace('.shp', '.parquet')}",
-            ],
-        'urban_layer_cols': agg_cfg.get('urban_layer_cols', ['ID_HDC_G0', 'agglosID']),
-        'urban_areas': cfg['geographic_layers']['urban_area_layers'],
-        'memory_limit_gb': int(agg_cfg.get('memory_limit_gb', 2010)),
-        'number_of_cpus': int(agg_cfg.get('number_of_cpus', 64)),
-        'max_workers': max_workers,
-    }
-    config['sub_threads'] = max(1, config['number_of_cpus'] // config['max_workers'])
-    return config
-
 def main():
     """Run the full Mapillary/OSM aggregation pipeline and export outputs."""
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-    cfg = load_config()
-    config = build_runtime_config(cfg)
+    config = load_config()
+    runtime_zoom_level = config['zoom_level']
     os.makedirs(config['results_dir_compiled'], exist_ok=True)
 
     # =========================
     # SQL query definitions
     # =========================
     pattern_query_z14 = 'z14_tiles_with_stats_*.parquet'
-    pattern_query_z8 = f'{zoom_level}_tiles_with_stats_*.parquet'
+    pattern_query_z8 = f'{runtime_zoom_level}_tiles_with_stats_*.parquet'
     pattern_query_country = 'countries_with_stats_*.parquet'
     pattern_query_continent = 'continents_with_stats_*.parquet'
     pattern_query_world = 'world_with_stats_*.parquet'
     urban_patterns = [f'{urban_area}_*.parquet' for urban_area in config['urban_areas']]
 
     input_filename_pattern_query_z14 = f"{config['results_dir']}/z14_tiles/{pattern_query_z14}"
-    input_filename_pattern_query_z8 = f"{config['results_dir']}/{zoom_level}_tiles/{pattern_query_z8}"
+    input_filename_pattern_query_z8 = f"{config['results_dir']}/{runtime_zoom_level}_tiles/{pattern_query_z8}"
     input_filename_pattern_query_country = f"{config['results_dir']}/countries/{pattern_query_country}"
     input_filename_pattern_query_continent = f"{config['results_dir']}/continents/{pattern_query_continent}"
     input_filename_pattern_query_world = f"{config['results_dir']}/world/{pattern_query_world}"
@@ -1007,11 +976,11 @@ def main():
     osm_filepath = config['osm_file_pattern']
     country_filepath = config['country_layer']
     continent_filepath = config['continent_layer']
-    # FIX [B-1]: Use runtime config key produced by build_runtime_config.
+    # FIX [B-1]: Use the runtime config key produced by the shared config helper.
     urban_filepaths = [os.path.abspath(f"{config['urban_areas_dir']}/{name}") for name in config['urban_layers']]
 
     # Optional branch for country-wise pre-aggregation export.
-    process_non_temporal_osm = False
+    process_non_temporal_osm = config['process_non_temporal_osm']
     if process_non_temporal_osm:
         countries_df = duckdb.execute(
             f"SELECT DISTINCT country FROM read_parquet('{country_filepath}')"

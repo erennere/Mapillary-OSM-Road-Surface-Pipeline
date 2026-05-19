@@ -201,7 +201,7 @@ class GetNearestMainTests(unittest.TestCase):
         return {
             "paths": {
                 "osm_intersections_dir": "/tmp/osm_intersections",
-                "nearest_lines": "/tmp/nearest_lines",
+                "osm_nearest_line_dir": "/tmp/nearest_lines",
             },
             "params": {
                 "threshold_1": 10,
@@ -213,19 +213,7 @@ class GetNearestMainTests(unittest.TestCase):
         }
 
     def _cfg_canonical_output_key(self):
-        return {
-            "paths": {
-                "osm_intersections_dir": "/tmp/osm_intersections",
-                "osm_nearest_line_dir": "/tmp/nearest_lines",
-            },
-            "params": {
-                "threshold_1": 10,
-                "threshold_2": 20,
-            },
-            "metadata_params": {
-                "updated_after": "2000-01-01T00:00:00",
-            },
-        }
+        return self._cfg()
 
     def test_main_creates_output_dir_and_processes_recent_file(self):
         filename = "c_u_metadata_unfiltered_metadata_unfiltered_159-145-8.parquet"
@@ -390,5 +378,106 @@ class GetNearestMainTests(unittest.TestCase):
             mock.patch.object(self.module.sys, "argv", ["get_nearest_osm_segments.py", "metadata_unfiltered_159-145-8.parquet"]),
             mock.patch.object(self.module.os, "chdir"),
         ):
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(KeyError):
                 self.module.main()
+
+    def test_main_exits_when_osm_intersections_dir_missing(self):
+        cfg = {
+            "paths": {
+                "osm_nearest_line_dir": "/tmp/nearest_lines",
+            },
+            "params": {
+                "threshold_1": 10,
+                "threshold_2": 20,
+            },
+            "metadata_params": {
+                "updated_after": "2000-01-01T00:00:00",
+            },
+        }
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg, create=True),
+            mock.patch.object(self.module.sys, "argv", ["get_nearest_osm_segments.py", "metadata_unfiltered_159-145-8.parquet"]),
+            mock.patch.object(self.module.os, "chdir"),
+        ):
+            with self.assertRaises(KeyError):
+                self.module.main()
+
+    def test_main_raises_when_threshold_values_invalid(self):
+        cfg = self._cfg()
+        cfg["params"]["threshold_1"] = "bad"
+        cfg["params"]["threshold_2"] = None
+        filename = "metadata_unfiltered_159-145-8.parquet"
+        captured = []
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/nearest_lines/tile=159-145-8"):
+                return False
+            return True
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg, create=True),
+            mock.patch.object(self.module.sys, "argv", ["get_nearest_osm_segments.py", filename]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module, "process_one_file", side_effect=lambda *a: captured.append(a)),
+        ):
+            with self.assertRaises(ValueError):
+                self.module.main()
+
+        self.assertEqual(len(captured), 0)
+
+    def test_main_raises_when_updated_after_invalid(self):
+        cfg = self._cfg()
+        cfg["metadata_params"]["updated_after"] = "not-a-date"
+        filename = "metadata_unfiltered_159-145-8.parquet"
+        captured = []
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/nearest_lines/tile=159-145-8"):
+                return False
+            return True
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg, create=True),
+            mock.patch.object(self.module.sys, "argv", ["get_nearest_osm_segments.py", filename]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module, "process_one_file", side_effect=lambda *a: captured.append(a)),
+        ):
+            with self.assertRaises(ValueError):
+                self.module.main()
+
+        self.assertEqual(len(captured), 0)
+
+    def test_main_raises_when_threshold_keys_missing(self):
+        cfg = self._cfg()
+        cfg["params"] = {}
+        filename = "metadata_unfiltered_159-145-8.parquet"
+        captured = []
+
+        def fake_exists(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/nearest_lines/tile=159-145-8"):
+                return False
+            return True
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg, create=True),
+            mock.patch.object(self.module.sys, "argv", ["get_nearest_osm_segments.py", filename]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module, "process_one_file", side_effect=lambda *a: captured.append(a)),
+        ):
+            with self.assertRaises(KeyError):
+                self.module.main()
+
+        self.assertEqual(len(captured), 0)

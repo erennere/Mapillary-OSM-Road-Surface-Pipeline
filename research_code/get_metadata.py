@@ -20,7 +20,7 @@ import random
 import pandas as pd
 import geopandas as gpd
 from metadata_download import get_metadata
-from start import load_config
+from start import load_config, parse_bool, parse_int, require_path
 
 # Configure logging
 logging.basicConfig(
@@ -131,10 +131,17 @@ def main():
     cfg = load_config()
     logging.info("Configuration loaded successfully")
 
-    batch_size = cfg['metadata_params']['batch_size']
-    windows = cfg['metadata_params']['windows']
-    max_workers = int(os.environ.get('SLURM_CPUS_PER_TASK', cfg['metadata_params']['max_workers']))
-    data_dir = os.path.abspath(cfg['paths']['raw_metadata_dir'])
+    batch_size = parse_int(require_path(cfg, 'metadata_params', 'batch_size'), 'metadata_params.batch_size', min_value=1)
+    windows = parse_bool(require_path(cfg, 'metadata_params', 'windows'), 'metadata_params.windows')
+    configured_max_workers = parse_int(require_path(cfg, 'metadata_params', 'max_workers'), 'metadata_params.max_workers', min_value=1)
+    slurm_cpus = os.environ.get('SLURM_CPUS_PER_TASK')
+    try:
+        max_workers = int(slurm_cpus) if slurm_cpus is not None else configured_max_workers
+    except (TypeError, ValueError):
+        logging.warning(f"Invalid SLURM_CPUS_PER_TASK={slurm_cpus!r}; falling back to config max_workers={configured_max_workers}")
+        max_workers = configured_max_workers
+    max_workers = max(1, max_workers)
+    data_dir = os.path.abspath(require_path(cfg, 'paths', 'raw_metadata_dir'))
     if not os.path.exists(data_dir):
         os.makedirs(data_dir, exist_ok=True)
         logging.info(f"Created metadata output directory: {data_dir}")
@@ -147,21 +154,21 @@ def main():
     ]}
 
     monitoring = {
-        'monitor_interval': cfg['metadata_params'].get('monitor_interval', 10),
-        'monitor_check_timeout': cfg['metadata_params'].get('monitor_check_timeout', 10),
-        'write_interval': cfg['metadata_params'].get('write_interval', 300),
-        'write_check_timeout': cfg['metadata_params'].get('write_check_timeout', 10)
+        'monitor_interval': parse_int(require_path(cfg, 'metadata_params', 'monitor_interval'), 'metadata_params.monitor_interval', min_value=1),
+        'monitor_check_timeout': parse_int(require_path(cfg, 'metadata_params', 'monitor_check_timeout'), 'metadata_params.monitor_check_timeout', min_value=1),
+        'write_interval': parse_int(require_path(cfg, 'metadata_params', 'write_interval'), 'metadata_params.write_interval', min_value=1),
+        'write_check_timeout': parse_int(require_path(cfg, 'metadata_params', 'write_check_timeout'), 'metadata_params.write_check_timeout', min_value=1),
     }
     
     logging.debug(f"Batch size: {batch_size}, Windows: {windows}, Max workers: {max_workers}")
     logging.debug(f"Output directory: {data_dir}")
 
-    zoom_level = cfg['params']['zoom_level']
-    mly_key = cfg['params']['mly_key']
-    missing_attempts = max(1, int(cfg['metadata_params']['missing_attempts']))
-    columns = cfg['metadata_columns']
+    zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
+    mly_key = require_path(cfg, 'params', 'mly_key')
+    missing_attempts = parse_int(require_path(cfg, 'metadata_params', 'missing_attempts'), 'metadata_params.missing_attempts', min_value=1)
+    columns = require_path(cfg, 'metadata_columns')
     tiles_col = f'z{zoom_level}_tiles'
-    tiles_filepath = os.path.abspath(os.path.join(cfg['paths']['completed_tiles_dir'], f'finished_tiles_z{zoom_level}.gpkg'))
+    tiles_filepath = os.path.abspath(os.path.join(require_path(cfg, 'paths', 'completed_tiles_dir'), f'finished_tiles_z{zoom_level}.gpkg'))
     
     logging.debug(f"Zoom level: {zoom_level}, Tiles file: {tiles_filepath}")
 
@@ -170,8 +177,8 @@ def main():
         'columns': columns,
         'params': params,
         'job_patterns': [
-            {'pattern': os.path.join(data_dir, 'sequences_*.csv'), 'threshold': cfg['metadata_params'].get('file_age_threshold_seconds', 450)},
-            {'pattern': os.path.join(data_dir, 'metadata_unfiltered_*.csv'), 'threshold': cfg['metadata_params'].get('file_age_threshold_seconds', 450)}
+            {'pattern': os.path.join(data_dir, 'sequences_*.csv'), 'threshold': parse_int(require_path(cfg, 'metadata_params', 'file_age_threshold_seconds'), 'metadata_params.file_age_threshold_seconds', min_value=1)},
+            {'pattern': os.path.join(data_dir, 'metadata_unfiltered_*.csv'), 'threshold': parse_int(require_path(cfg, 'metadata_params', 'file_age_threshold_seconds'), 'metadata_params.file_age_threshold_seconds', min_value=1)}
         ],
         'max_workers': max_workers,
         'batch_size': batch_size,

@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio, aiohttp, threading
 import cv2
 import glob
-from start import load_config
+from start import load_config, parse_bool, parse_bool_with_default, parse_int, require_path
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -198,8 +198,8 @@ async def save_image(filepath_original, filepath_resized, image_org, image_resiz
                 if not org_save_true and index == 0:
                     cond[index] = True
                     continue
-                cv2.imwrite(file, image)
-                cond[index] = True
+                # Treat failed cv2.imwrite calls as unsuccessful writes.
+                cond[index] = bool(cv2.imwrite(file, image))
             if cond[0] and cond[1]:
                 exception = False
                 return True, exception
@@ -390,6 +390,9 @@ def orchestrate(metadata, missing_images_file, original_dir, resized_dir,
         org_save_true (bool): Save original images if True.
     """
     global allowed_connections, allowed_connections_current, thread_stop, missing_images, missing_image_ids
+
+    windows = parse_bool_with_default(windows, "image_download.orchestrate.windows", False)
+    org_save_true = parse_bool_with_default(org_save_true, "image_download.orchestrate.org_save_true", False)
     
     # Reset global state for each orchestration run
     allowed_connections = download_args.get('allowed_connections', 10000)
@@ -471,23 +474,33 @@ if __name__ == '__main__':
     logging.info("Configuration loaded successfully")
 
     # Extract configuration parameters
-    download_args = {k: cfg['image_params'][k] for k in ['image_size', 'call_limit', 'sleep_time', 'allowed_connections']}
-    max_workers = cfg['image_params']['max_workers']
-    batch_size = cfg['image_params']['batch_size']
-    windows = cfg['image_params']['windows']
-    org_save_true = cfg['image_params']['org_save_true']
-    image_dir = os.path.abspath(cfg['paths']['image_dir'])
+    download_args = {
+        'image_size': require_path(cfg, 'image_params', 'image_size'),
+        'call_limit': parse_int(require_path(cfg, 'image_params', 'call_limit'), 'image_params.call_limit', min_value=1),
+        'sleep_time': parse_int(require_path(cfg, 'image_params', 'sleep_time'), 'image_params.sleep_time', min_value=1),
+        'allowed_connections': parse_int(require_path(cfg, 'image_params', 'allowed_connections'), 'image_params.allowed_connections', min_value=1),
+    }
+    max_workers = parse_int(require_path(cfg, 'image_params', 'max_workers'), 'image_params.max_workers', min_value=1)
+    batch_size = parse_int(require_path(cfg, 'image_params', 'batch_size'), 'image_params.batch_size', min_value=1)
+    windows = parse_bool(require_path(cfg, 'image_params', 'windows'), 'image_params.windows')
+    org_save_true = parse_bool(require_path(cfg, 'image_params', 'org_save_true'), 'image_params.org_save_true')
+    image_dir = os.path.abspath(require_path(cfg, 'paths', 'image_dir'))
     
-    random_seed = cfg['image_params']['random_seed']
+    random_seed = parse_int(require_path(cfg, 'image_params', 'random_seed'), 'image_params.random_seed', min_value=1)
     random.seed(random_seed)
     logging.info(f"Parameters: max_workers={max_workers}, batch_size={batch_size}, windows={windows}, org_save_true={org_save_true}, random_seed={random_seed}")
 
-    tiles_dir = os.path.abspath(cfg['paths']['tile_partitioned_parquet_raw_metadata_dir'])
+    tiles_dir = os.path.abspath(require_path(cfg, 'paths', 'tile_partitioned_parquet_raw_metadata_dir'))
     all_files = glob.glob(os.path.join(tiles_dir, '*', '*.parquet'), recursive=True)
     if len(sys.argv) < 3:
         raise ValueError("Usage: image_download.py <chunk_idx> <chunk_size>")
-    chunk_idx = int(sys.argv[1])
-    chunk_size = int(sys.argv[2])
+    try:
+        chunk_idx = int(sys.argv[1])
+        chunk_size = int(sys.argv[2])
+    except (TypeError, ValueError):
+        raise ValueError("Usage: image_download.py <chunk_idx> <chunk_size> (both must be integers)")
+    if chunk_idx < 0 or chunk_size <= 0:
+        raise ValueError("Usage: image_download.py <chunk_idx> <chunk_size> (chunk_idx >= 0 and chunk_size > 0)")
     all_files = sorted(all_files)
     random.shuffle(all_files)
     selected_files = all_files[chunk_idx*chunk_size:(chunk_idx+1)*chunk_size]

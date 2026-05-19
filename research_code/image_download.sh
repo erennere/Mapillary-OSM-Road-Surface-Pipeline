@@ -10,18 +10,14 @@
 #   HPC:   SLURM detected (SLURM_JOB_ID exists)
 #   LOCAL: No SLURM environment
 #
-# Default Execution Modes:
-#   HPC:   array job (10 chunks distributed across SLURM tasks)
-#   LOCAL: sequential (process chunks one at a time)
-#
-# Available Execution Modes (via config override):
+# Available Execution Modes (from config):
 #   array:      One chunk per SLURM task (HPC only, default on HPC)
-#   sequential: One chunk at a time (default on LOCAL)
+#   sequential: One chunk at a time
 #   parallel:   Multiple chunks concurrently (HPC + LOCAL)
 #
-# Configuration (from config.yaml):
+# Configuration (from image_download section in config.yaml):
 #   execution.mode: array | sequential | parallel
-#   execution.num_jobs: number of parallel chunks (default: 10)
+#   execution.num_jobs: number of parallel chunks
 #
 # SLURM Header (only needed when submitting to HPC):
 #SBATCH --partition=cpu-single
@@ -56,27 +52,24 @@ export NUMEXPR_NUM_THREADS=$OMP_NUM_THREADS
 
 if [[ -n "$SLURM_JOB_ID" ]]; then
     ENVIRONMENT="HPC"
-    DEFAULT_MODE="array"
-    DEFAULT_NUM_JOBS=10
 else
     ENVIRONMENT="LOCAL"
-    DEFAULT_MODE="sequential"
-    DEFAULT_NUM_JOBS=$(nproc 2>/dev/null || echo 4)
 fi
 
-echo "Environment: $ENVIRONMENT (default mode: $DEFAULT_MODE)"
+echo "Environment: $ENVIRONMENT"
 
 ################################################################################
-# Configuration Override (from config.yaml if present)
+# Configuration (from start.py resolution)
 ################################################################################
 
-if [[ -f "config.yaml" ]]; then
-    MODE=$(grep -E "^\s*mode:" config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ' || echo "$DEFAULT_MODE")
-    NUM_JOBS=$(grep -E "^\s*num_jobs:" config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ' || echo "$DEFAULT_NUM_JOBS")
-else
-    MODE=$DEFAULT_MODE
-    NUM_JOBS=$DEFAULT_NUM_JOBS
-fi
+eval "$(python - <<'PY'
+from start import load_config
+
+cfg = load_config(script_name='image_download')
+print(f'export MODE="{cfg["execution"]["mode"]}"')
+print(f'export NUM_JOBS={cfg["execution"]["num_jobs"]}')
+PY
+)"
 
 echo "Execution mode: $MODE (num_jobs: $NUM_JOBS)"
 

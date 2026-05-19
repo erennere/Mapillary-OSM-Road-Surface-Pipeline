@@ -36,7 +36,7 @@ from shapely.geometry import box
 from shapely import Point
 import aiohttp
 from tqdm import tqdm
-from start import load_config
+from start import load_config, parse_bool, parse_int, parse_positive_int, require_path
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -130,18 +130,31 @@ def monitor_jobs(patterns: List[Dict[str, Any]], interval: int = 10, start: bool
     """
     global thread_stop, allowed_connection, number_of_jobs_running
     
+    max_connections = parse_positive_int(max_connections, "metadata_download.monitor_jobs.max_connections", 10000)
+
     while not thread_stop:
         try:
             all_files = []
             for pattern_config in patterns:
                 pattern = pattern_config.get('pattern')
                 threshold = pattern_config.get('threshold', FILE_AGE_THRESHOLD_SECONDS)
-                
-                matching_files = [
-                    file for file in glob.glob(pattern)
-                    if os.path.isfile(file)
-                    and (time.time() - os.path.getmtime(file)) < threshold
-                ]
+                try:
+                    threshold = float(threshold)
+                except (TypeError, ValueError):
+                    logger.warning(f"Invalid file age threshold {threshold!r}; defaulting to {FILE_AGE_THRESHOLD_SECONDS}")
+                    threshold = float(FILE_AGE_THRESHOLD_SECONDS)
+
+                matching_files = []
+                for file in glob.glob(pattern):
+                    if not os.path.isfile(file):
+                        continue
+                    try:
+                        file_age = time.time() - os.path.getmtime(file)
+                    except OSError as e:
+                        logger.debug(f"Skipping file during monitor_jobs due to stat error: {file} ({e})")
+                        continue
+                    if file_age < threshold:
+                        matching_files.append(file)
                 all_files.extend(matching_files)
             
             jobs_count = len(all_files)
@@ -651,7 +664,7 @@ def segmented_bboxes(boundary_box: List[float], n: int) -> List[List[float]]:
         list: List of [west, south, east, north] bboxes
     """
     west, south, east, north = boundary_box
-    n = max(1, int(n))
+    n = parse_positive_int(n, "metadata_download.segmented_bboxes.n", 1)
     num_rows_cols = math.ceil(math.sqrt(n))
     boxes = []
     
@@ -822,8 +835,13 @@ def get_sequences(bbox: List[float], mly_key: str, n: int, output_dir: str, numb
     
     global thread_stop, allowed_connection_current, allowed_connection, global_sequences, global_bboxes, number_of_requests
 
-    max_workers = max(1, int(max_workers))
-    max_connections = int(params.get('max_connections', 10000))
+    params = params or {}
+    max_workers = parse_positive_int(max_workers, "metadata_download.get_sequences.max_workers", 4)
+    max_connections = parse_positive_int(
+        params.get('max_connections', 10000),
+        "metadata_download.get_sequences.max_connections",
+        10000,
+    )
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -1039,8 +1057,13 @@ def get_metadata(sequence_list: List[str], missing_sequences_file: str, metadata
     
     global thread_stop, write_true, allowed_connection_current, allowed_connection, number_of_requests
 
-    max_workers = max(1, int(max_workers))
-    max_connections = int(params.get('max_connections', 10000))
+    params = params or {}
+    max_workers = parse_positive_int(max_workers, "metadata_download.get_metadata.max_workers", 4)
+    max_connections = parse_positive_int(
+        params.get('max_connections', 10000),
+        "metadata_download.get_metadata.max_connections",
+        10000,
+    )
     
     # FIX [C-1]: Handle basename-only paths by using current directory instead of empty path.
     metadata_parent_dir = os.path.dirname(metadata_file) or "."
@@ -1181,6 +1204,9 @@ def main(bbox: List[float], mly_key: str, columns: List[str], n: int, output_dir
     global number_of_requests
     with request_count_lock:
         number_of_requests = 0
+
+    max_workers = parse_positive_int(max_workers, "metadata_download.main.max_workers", 4)
+    batch_size = parse_positive_int(batch_size, "metadata_download.main.batch_size", 100)
     
     time_pipeline_start = time.time()
     
@@ -1240,42 +1266,65 @@ if __name__ == '__main__':
     
     job_id = str(sys.argv[1]) if len(sys.argv) > 1 else 0
     
-    output_directory = os.path.abspath(config['paths']['raw_metadata_dir'])
+    output_directory = os.path.abspath(require_path(config, 'paths', 'raw_metadata_dir'))
     os.makedirs(output_directory, exist_ok=True)
     
-    api_key = config['params']['mly_key']
-    
-    metadata_config = config['metadata_params']
-    query_bbox = metadata_config['query_bbox']
-    meta_basename = f"{metadata_config['metadata_basename']}_{job_id}"
-    missing_basename = f"{metadata_config['missing_basename']}_{job_id}"
-    initial_subdivisions = metadata_config['initial_subdivisions']
-    subdivision_factor = metadata_config['subdivision_factor']
-    enable_download = metadata_config['enable_download']
-    max_workers = metadata_config.get('max_workers', 4)
-    batch_size = metadata_config.get('batch_size', 100)
-    windows_platform = metadata_config.get('windows', True)
+    api_key = require_path(config, 'params', 'mly_key')
+
+    query_bbox = require_path(config, 'metadata_params', 'query_bbox')
+    metadata_basename = require_path(config, 'metadata_params', 'metadata_basename')
+    missing_base = require_path(config, 'metadata_params', 'missing_basename')
+    meta_basename = f"{metadata_basename}_{job_id}"
+    missing_basename = f"{missing_base}_{job_id}"
+    initial_subdivisions = parse_int(
+        require_path(config, 'metadata_params', 'initial_subdivisions'),
+        'metadata_params.initial_subdivisions',
+        min_value=1,
+    )
+    subdivision_factor = parse_int(
+        require_path(config, 'metadata_params', 'subdivision_factor'),
+        'metadata_params.subdivision_factor',
+        min_value=1,
+    )
+    enable_download = parse_bool(
+        require_path(config, 'metadata_params', 'enable_download'),
+        'metadata_params.enable_download',
+    )
+    max_workers = parse_int(
+        require_path(config, 'metadata_params', 'max_workers'),
+        'metadata_params.max_workers',
+        min_value=1,
+    )
+    batch_size = parse_int(
+        require_path(config, 'metadata_params', 'batch_size'),
+        'metadata_params.batch_size',
+        min_value=1,
+    )
+    windows_platform = parse_bool(
+        require_path(config, 'metadata_params', 'windows'),
+        'metadata_params.windows',
+    )
     
     params = {
-        'retries': metadata_config.get('retries', 5),
-        'call_limit': metadata_config.get('call_limit', 5),
-        'empty_data_attempts': metadata_config.get('empty_data_attempts', 3),
-        'max_connections': metadata_config.get('max_connections', 10000),
-        'sleep_time': metadata_config.get('sleep_time', 5)
+        'retries': parse_int(require_path(config, 'metadata_params', 'retries'), 'metadata_params.retries', min_value=1),
+        'call_limit': parse_int(require_path(config, 'metadata_params', 'call_limit'), 'metadata_params.call_limit', min_value=1),
+        'empty_data_attempts': parse_int(require_path(config, 'metadata_params', 'empty_data_attempts'), 'metadata_params.empty_data_attempts', min_value=1),
+        'max_connections': parse_int(require_path(config, 'metadata_params', 'max_connections'), 'metadata_params.max_connections', min_value=1),
+        'sleep_time': parse_int(require_path(config, 'metadata_params', 'sleep_time'), 'metadata_params.sleep_time', min_value=1),
     }
     
     monitoring = {
-        'monitor_interval': metadata_config.get('monitor_interval', 10),
-        'monitor_check_timeout': metadata_config.get('monitor_check_timeout', 10),
-        'write_interval': metadata_config.get('write_interval', 300),
-        'write_check_timeout': metadata_config.get('write_check_timeout', 10)
+        'monitor_interval': parse_int(require_path(config, 'metadata_params', 'monitor_interval'), 'metadata_params.monitor_interval', min_value=1),
+        'monitor_check_timeout': parse_int(require_path(config, 'metadata_params', 'monitor_check_timeout'), 'metadata_params.monitor_check_timeout', min_value=1),
+        'write_interval': parse_int(require_path(config, 'metadata_params', 'write_interval'), 'metadata_params.write_interval', min_value=1),
+        'write_check_timeout': parse_int(require_path(config, 'metadata_params', 'write_check_timeout'), 'metadata_params.write_check_timeout', min_value=1),
     }
     
-    columns_list = config['metadata_columns']
+    columns_list = require_path(config, 'metadata_columns')
     
     logger.info(f"Configuration loaded from config.yaml")
     logger.info(f"Job ID: {job_id}, API Key: {api_key[:20]}...")
-    
+
     main(
         query_bbox, api_key, columns_list, subdivision_factor, output_directory, job_id,
         meta_basename, missing_basename, initial_subdivisions, params,

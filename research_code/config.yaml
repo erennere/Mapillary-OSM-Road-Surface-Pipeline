@@ -1,138 +1,271 @@
-params:
-  zoom_level: 8
-  mly_key: "MLY|7528238413968457|ed14c6e38679af952a575dbf5ef5ffcf"
-  n_max_rows_parquet: 500000
-  urban_threshold: 100
-  rural_threshold: 1000
-  ghsl_col_1: ".ID_UC_G0"
-  ghsl_col_2: ".GC_UCN_MAI_2025"
-  africapolis_col_1: ".agglosID"
-  africapolis_col_2: ".agglosName"
-  earth_radius: 6371008
-  distance_threshold: 30
-  threshold_1: 10
-  threshold_2: 20
-  seed: 42
+# Keys marked null are resolved at runtime from the section noted in the comment.
+# YAML section order is the canonical run order for shared-value propagation.
+# To override a shared key for a specific script, replace null with the desired value.
+# CLI overrides always take precedence over config-owned or imported values.
+# Never use fallback/default patterns in code - missing keys must raise immediately.
 
-paths:
-  data_dir: "../data"
-  processed_dir: "{data_dir}/processed"
-  starter_dir: "{data_dir}/starter_files"
-  tiles_save_dir: "{processed_dir}/tiles"
-  completed_tiles_dir: "{processed_dir}/tiles/completed"
-  failed_tiles_dir: "{processed_dir}/tiles/failed"
-  raw_metadata_dir: "{processed_dir}/mapillary_metadata/raw_metadata"
-  splitted_raw_metadata_dir: "{processed_dir}/mapillary_metadata/splitted_raw_metadata"
-  tile_partitioned_parquet_raw_metadata_dir: "{processed_dir}/mapillary_metadata/hive_partitioned_raw_metadata"
-  unfiltered_metadata_dir: "{processed_dir}/mapillary_metadata/spatial_intersections/intersected_unfiltered_metadata"
-  ohsome_osm_dir: ""
-  osm_saving_dir: "{data_dir}/osm_data/ohsome_data"
-  osm_partitioned_dir: "{data_dir}/osm_data/hive_partitioned_osm_data"
-  osm_intersections_dir: "{processed_dir}/mapillary_metadata/spatial_intersections/found_osm_segments"
-  osm_nearest_line_dir: "{processed_dir}/mapillary_metadata/spatial_intersections/nearest_lines"
-  image_dir: "{data_dir}/images"
-  continents_dir: "{starter_dir}/continents"
-  final_unfiltered_dir: "{processed_dir}/final_unfiltered_metadata"
-  final_filtered_dir: "{processed_dir}/final_filtered_metadata"
-  stats_dir: "{processed_dir}/stats"
-  
-filenames:
-  starter_polygon_fn: ""
-  continents_filename: "{processed_dir}/continents.parquet"
-  overture_url: "s3://overturemaps-us-west-2/release/2025-01-22.0"
-  country_filename: "overture_divisions.parquet"
-  ghsl_filename: "GHS_UCDB_GLOBE_R2024A.gpkg"
-  africapolis_filename: "AFRICAPOLIS2020.shp"
+create_tiles:
+  params:
+    zoom_level: 8
+  paths:
+    data_dir: "../data"
+    processed_dir: "{data_dir}/processed"
+    starter_dir: "{data_dir}/starter_files"
+    tiles_save_dir: "{processed_dir}/tiles"
+  filenames:
+    starter_polygon_fn: ""
+    country_filename: "overture_divisions.parquet"
 
-metadata_params:
-  retries: 5
-  batch_size: 100
-  windows: true
-  call_limit: 5
-  empty_data_attempts: 3
-  max_connections: 10000
-  sleep_time: 5
-  max_workers: 16
-  missing_attempts: 1
-  updated_after: "2026-03-18T00:49:00"
-  query_bbox: [8.657570, 49.392653, 8.707523, 49.420689]
-  metadata_basename: "metadata_unfiltered"
-  missing_basename: "missing_sequences"
-  initial_subdivisions: 100
-  subdivision_factor: 4
-  enable_download: true
-  monitor_interval: 10
-  monitor_check_timeout: 10
-  write_interval: 300
-  write_check_timeout: 10
+get_linestrings_from_tiles:
+  params:
+    zoom_level: null  # resolved from 'create_tiles' at runtime
+    mly_key: "MLY|7528238413968457|ed14c6e38679af952a575dbf5ef5ffcf"
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    tiles_save_dir: null  # resolved from 'create_tiles' at runtime
+    completed_tiles_dir: "{processed_dir}/tiles/completed"
+    failed_tiles_dir: "{processed_dir}/tiles/failed"
+  metadata_params:
+    retries: 5
 
-csv_split_params:
-  n_rows: 500000
-  split_enabled: true
-  updated_after: "2026-03-18T00:49:00"
-
-image_params:
-  image_size: [256, 427]
-  call_limit: 5
-  sleep_time: 5
-  allowed_connections: 10000
-  max_workers: 16
-  batch_size: 1000
-  windows: false
-  if_metadata: false
-  org_save_true: false
-  random_seed: 42
-
-metadata_columns:
-  - sequence
-  - id
-  - thumb_original_url
-  - long
-  - lat
-  - computed_geometry
-  - height
-  - width
-  - altitude
-  - make
-  - model
-  - creator
-  - is_pano
-  - captured_at
-
-# Image download execution configuration
-execution:
-  mode: sequential  # Execution mode: array (HPC only), sequential (default local), parallel
-  num_jobs: 10      # Number of chunks/parallel jobs (default: 10 on HPC, nproc on local)
-
-statistics:
-  shared:
-    highways: [motorway, trunk, primary, secondary, tertiary, unclassified, residential]
-    areas: [urban, rural]
-    road_types: [paved, unpaved]
-    road_classes:
-      motorway: [motorway, motorway_link]
-      trunk: [trunk, trunk_link]
-      primary: [primary, primary_link]
-      secondary: [secondary, secondary_link]
-      tertiary: [tertiary, tertiary_link]
-      unclassified: [unclassified]
-      residential: [residential]
-
-  geographic_layers:
-    osm_distance: 15
-    pred_distance: 10
-    sigma: 1
-    score: 0.8
-    threshold: 0.3
-    max_workers: 8
-    data_input_pattern: data_*.parquet
-    urban_area_layers:
-      - GHS_STAT_UCDB2015MT_GLOBE_R2019A
-      - AFRICAPOLIS2020
-    urban_area_cols: [ID_HDC_G0, agglosID]
-
-  aggregation:
-    urban_layer_cols: [ID_HDC_G0, agglosID]
-    memory_limit_gb: 2010
-    number_of_cpus: 64
+get_metadata:
+  params:
+    zoom_level: null  # resolved from 'create_tiles' at runtime
+    mly_key: null  # resolved from 'get_linestrings_from_tiles' at runtime
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    raw_metadata_dir: "{processed_dir}/mapillary_metadata/raw_metadata"
+    completed_tiles_dir: null  # resolved from 'get_linestrings_from_tiles' at runtime
+  metadata_params:
+    retries: null  # resolved from 'get_linestrings_from_tiles' at runtime
+    batch_size: 100
+    windows: true
+    call_limit: 5
+    empty_data_attempts: 3
+    max_connections: 10000
+    sleep_time: 5
     max_workers: 16
+    missing_attempts: 1
+    monitor_interval: 10
+    monitor_check_timeout: 10
+    write_interval: 300
+    write_check_timeout: 10
+    file_age_threshold_seconds: 450
+  metadata_columns:
+    - sequence
+    - id
+    - thumb_original_url
+    - long
+    - lat
+    - computed_geometry
+    - height
+    - width
+    - altitude
+    - make
+    - model
+    - creator
+    - is_pano
+    - captured_at
+
+metadata_download:
+  params:
+    mly_key: null  # resolved from 'get_linestrings_from_tiles' at runtime
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    raw_metadata_dir: null  # resolved from 'get_metadata' at runtime
+  metadata_params:
+    retries: null  # resolved from 'get_linestrings_from_tiles' at runtime
+    batch_size: null  # resolved from 'get_metadata' at runtime
+    windows: null  # resolved from 'get_metadata' at runtime
+    call_limit: null  # resolved from 'get_metadata' at runtime
+    empty_data_attempts: null  # resolved from 'get_metadata' at runtime
+    max_connections: null  # resolved from 'get_metadata' at runtime
+    sleep_time: null  # resolved from 'get_metadata' at runtime
+    max_workers: 16
+    query_bbox: [8.657570, 49.392653, 8.707523, 49.420689]
+    metadata_basename: "metadata_unfiltered"
+    missing_basename: "missing_sequences"
+    initial_subdivisions: 100
+    subdivision_factor: 4
+    enable_download: true
+    monitor_interval: null  # resolved from 'get_metadata' at runtime
+    monitor_check_timeout: null  # resolved from 'get_metadata' at runtime
+    write_interval: null  # resolved from 'get_metadata' at runtime
+    write_check_timeout: null  # resolved from 'get_metadata' at runtime
+  metadata_columns: null  # resolved from 'get_metadata' at runtime
+
+csv_to_parquet:
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    raw_metadata_dir: null  # resolved from 'get_metadata' at runtime
+    splitted_raw_metadata_dir: "{processed_dir}/mapillary_metadata/splitted_raw_metadata"
+    tile_partitioned_parquet_raw_metadata_dir: "{processed_dir}/mapillary_metadata/hive_partitioned_raw_metadata"
+  csv_split_params:
+    n_rows: 500000
+    split_enabled: true
+    updated_after: "2026-03-18T00:49:00"
+
+metadata_intersections_and_filtering:
+  params:
+    zoom_level: null  # resolved from 'create_tiles' at runtime
+    urban_threshold: 100
+    rural_threshold: 1000
+    ghsl_col_1: ".ID_UC_G0"
+    ghsl_col_2: ".GC_UCN_MAI_2025"
+    africapolis_col_1: ".agglosID"
+    africapolis_col_2: ".agglosName"
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    starter_dir: null  # resolved from 'create_tiles' at runtime
+    tile_partitioned_parquet_raw_metadata_dir: null  # resolved from 'csv_to_parquet' at runtime
+    continents_dir: "{starter_dir}/continents"
+    unfiltered_metadata_dir: "{processed_dir}/mapillary_metadata/spatial_intersections/intersected_unfiltered_metadata"
+    filtered_metadata_dir: "{processed_dir}/mapillary_metadata/spatial_intersections/intersected_filtered_metadata"
+  metadata_params:
+    updated_after: "2026-03-18T00:49:00"
+  filenames:
+    continents_filename: "{processed_dir}/continents.parquet"
+    overture_url: "s3://overturemaps-us-west-2/release/2025-01-22.0"
+    country_filename: null  # resolved from 'create_tiles' at runtime
+    ghsl_filename: "GHS_UCDB_GLOBE_R2024A.gpkg"
+    africapolis_filename: "AFRICAPOLIS2020.shp"
+
+highways_sort:
+  params:
+    zoom_level: null  # resolved from 'create_tiles' at runtime
+    n_max_rows_parquet: 500000
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    starter_dir: null  # resolved from 'create_tiles' at runtime
+    ohsome_osm_dir: ""
+    osm_saving_dir: "{data_dir}/osm_data/ohsome_data"
+    osm_partitioned_dir: "{data_dir}/osm_data/hive_partitioned_osm_data"
+    continents_dir: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+  metadata_params:
+    retries: null  # resolved from 'get_linestrings_from_tiles' at runtime
+    sleep_time: null  # resolved from 'get_metadata' at runtime
+    max_workers: 16
+  filenames:
+    continents_filename: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+    overture_url: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+    country_filename: null  # resolved from 'create_tiles' at runtime
+    ghsl_filename: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+    africapolis_filename: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+
+find_osm_segments:
+  params:
+    earth_radius: 6371008
+    zoom_level: null  # resolved from 'create_tiles' at runtime
+    distance_threshold: 30
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    unfiltered_metadata_dir: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+    osm_partitioned_dir: null  # resolved from 'highways_sort' at runtime
+    osm_intersections_dir: "{processed_dir}/mapillary_metadata/spatial_intersections/found_osm_segments"
+  metadata_params:
+    updated_after: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+
+get_nearest_osm_segments:
+  params:
+    threshold_1: 10
+    threshold_2: 20
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    osm_intersections_dir: null  # resolved from 'find_osm_segments' at runtime
+    osm_nearest_line_dir: "{processed_dir}/mapillary_metadata/spatial_intersections/nearest_lines"
+  metadata_params:
+    updated_after: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+
+image_download:
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    image_dir: "{data_dir}/images"
+    tile_partitioned_parquet_raw_metadata_dir: null  # resolved from 'csv_to_parquet' at runtime
+  image_params:
+    image_size: [256, 427]
+    call_limit: 5
+    sleep_time: 5
+    allowed_connections: 10000
+    max_workers: 16
+    batch_size: 1000
+    windows: false
+    org_save_true: false
+    random_seed: 42
+  execution:
+    mode: sequential
+    num_jobs: 10
+
+statistics_geographic_layers:
+  params:
+    zoom_level: null  # resolved from 'create_tiles' at runtime
+    seed: 42
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    stats_dir: "{processed_dir}/stats"
+    osm_partitioned_dir: null  # resolved from 'highways_sort' at runtime
+    final_filtered_dir: "{processed_dir}/final_filtered_metadata"
+  statistics:
+    shared:
+      highways: [motorway, trunk, primary, secondary, tertiary, unclassified, residential]
+      areas: [urban, rural]
+      road_types: [paved, unpaved]
+      road_classes:
+        motorway: [motorway, motorway_link]
+        trunk: [trunk, trunk_link]
+        primary: [primary, primary_link]
+        secondary: [secondary, secondary_link]
+        tertiary: [tertiary, tertiary_link]
+        unclassified: [unclassified]
+        residential: [residential]
+    geographic_layers:
+      osm_distance: 15
+      pred_distance: 10
+      sigma: 1
+      score: 0.8
+      threshold: 0.3
+      max_workers: 8
+      data_input_pattern: data_*.parquet
+      urban_area_layers:
+        - GHS_STAT_UCDB2015MT_GLOBE_R2019A
+        - AFRICAPOLIS2020
+      urban_area_cols: [ID_HDC_G0, agglosID]
+
+statistics_aggregation:
+  params:
+    zoom_level: null  # resolved from 'create_tiles' at runtime
+  paths:
+    data_dir: null  # resolved from 'create_tiles' at runtime
+    processed_dir: null  # resolved from 'create_tiles' at runtime
+    stats_dir: null  # resolved from 'statistics_geographic_layers' at runtime
+    osm_saving_dir: null  # resolved from 'highways_sort' at runtime
+  filenames:
+    country_filename: null  # resolved from 'create_tiles' at runtime
+    continents_filename: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+    ghsl_filename: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+    africapolis_filename: null  # resolved from 'metadata_intersections_and_filtering' at runtime
+  statistics:
+    shared: null  # resolved from 'statistics_geographic_layers' at runtime
+    geographic_layers:
+      urban_area_layers: null  # resolved from 'statistics_geographic_layers' at runtime
+    aggregation:
+      urban_layer_cols: [ID_HDC_G0, agglosID]
+      memory_limit_gb: 2010
+      number_of_cpus: 64
+      max_workers: 16
+      process_non_temporal_osm: false
+
+dlr:
+  params:
+    mly_key: null  # resolved from 'get_linestrings_from_tiles' at runtime
+  metadata_params:
+    retries: null  # resolved from 'get_linestrings_from_tiles' at runtime

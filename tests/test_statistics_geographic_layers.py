@@ -144,14 +144,23 @@ class StatisticsGeographicLayersTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = import_statistics_module()
 
-    def test_load_statistics_runtime_config_uses_defaults_and_overrides(self):
+    def test_load_statistics_runtime_config_uses_required_values(self):
         cfg = {
-            "paths": {"stats_dir": "/tmp/stats"},
-            "params": {"zoom_level": "9"},
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "osm_partitioned_dir": "/tmp/osm_partitioned",
+                "final_filtered_dir": "/tmp/final_filtered",
+            },
+            "params": {"seed": "17", "zoom_level": "9"},
             "statistics": {
                 "geographic_layers": {
                     "osm_distance": "20",
+                    "pred_distance": "12",
+                    "sigma": "1.2",
                     "score": "0.95",
+                    "threshold": "0.25",
+                    "max_workers": 3,
+                    "data_input_pattern": "data_*.parquet",
                     "urban_area_layers": ["CUSTOM_LAYER"],
                     "urban_area_cols": ["urban_id"],
                 }
@@ -161,29 +170,71 @@ class StatisticsGeographicLayersTests(unittest.TestCase):
         runtime = self.module.load_statistics_runtime_config(cfg)
 
         self.assertEqual(runtime["osm_distance"], 20)
-        self.assertEqual(runtime["pred_distance"], 10)
+        self.assertEqual(runtime["pred_distance"], 12)
+        self.assertEqual(runtime["sigma"], 1.2)
         self.assertEqual(runtime["score"], 0.95)
-        self.assertEqual(runtime["threshold"], 0.3)
+        self.assertEqual(runtime["threshold"], 0.25)
+        self.assertEqual(runtime["max_workers"], 3)
+        self.assertEqual(runtime["seed"], 17)
         self.assertEqual(runtime["zoom_level"], 9)
         self.assertEqual(runtime["urban_area_layers"], ["CUSTOM_LAYER"])
         self.assertEqual(runtime["urban_area_cols"], ["urban_id"])
+        self.assertEqual(runtime["osm_partitioned_dir"], os.path.abspath("/tmp/osm_partitioned"))
+        self.assertEqual(runtime["final_filtered_dir"], os.path.abspath("/tmp/final_filtered"))
         expected_suffix = os.path.normpath(os.path.join("/tmp/stats", "geographic_layers"))
         self.assertTrue(os.path.normpath(runtime["results_dir"]).endswith(expected_suffix))
 
-    def test_load_statistics_runtime_config_normalizes_zero_max_workers_to_one(self):
+    def test_load_statistics_runtime_config_raises_when_max_workers_is_zero(self):
         cfg = {
-            "paths": {"stats_dir": "/tmp/stats"},
-            "params": {"zoom_level": "8"},
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "osm_partitioned_dir": "/tmp/osm_partitioned",
+                "final_filtered_dir": "/tmp/final_filtered",
+            },
+            "params": {"seed": "17", "zoom_level": "8"},
             "statistics": {
                 "geographic_layers": {
+                    "osm_distance": 15,
+                    "pred_distance": 10,
+                    "sigma": 1.0,
+                    "score": 0.8,
+                    "threshold": 0.3,
                     "max_workers": 0,
+                    "data_input_pattern": "data_*.parquet",
+                    "urban_area_layers": ["GHSL", "AFRICAPOLIS"],
+                    "urban_area_cols": ["ID_HDC_G0", "agglosID"],
                 }
             },
         }
 
-        runtime = self.module.load_statistics_runtime_config(cfg)
+        with self.assertRaises(ValueError):
+            self.module.load_statistics_runtime_config(cfg)
 
-        self.assertEqual(runtime["max_workers"], 1)
+    def test_load_statistics_runtime_config_raises_on_invalid_numeric_values(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "osm_partitioned_dir": "/tmp/osm_partitioned",
+                "final_filtered_dir": "/tmp/final_filtered",
+            },
+            "params": {"seed": "17", "zoom_level": "bad"},
+            "statistics": {
+                "geographic_layers": {
+                    "osm_distance": "x",
+                    "pred_distance": None,
+                    "sigma": "nan-not-number",
+                    "score": "oops",
+                    "threshold": "invalid",
+                    "max_workers": "not-int",
+                    "data_input_pattern": "data_*.parquet",
+                    "urban_area_layers": ["GHSL", "AFRICAPOLIS"],
+                    "urban_area_cols": ["ID_HDC_G0", "agglosID"],
+                }
+            },
+        }
+
+        with self.assertRaises(ValueError):
+            self.module.load_statistics_runtime_config(cfg)
 
     def test_sql_in_list_escapes_quotes_and_rejects_empty_input(self):
         self.assertEqual(
@@ -562,6 +613,7 @@ class StatisticsGeographicLayersTests(unittest.TestCase):
         }
 
         runtime_cfg = {
+            "seed": 42,
             "urban_area_cols": ["ID_HDC_G0", "agglosID"],
             "urban_area_layers": ["GHSL", "AFRICAPOLIS"],
             "osm_distance": 15,
@@ -570,13 +622,15 @@ class StatisticsGeographicLayersTests(unittest.TestCase):
             "score": 0.8,
             "threshold": 0.3,
             "max_workers": 4,
+            "osm_partitioned_dir": "/tmp/osm_partitioned",
+            "final_filtered_dir": "/tmp/final_filtered",
             "results_dir": "/tmp/stats/geographic_layers",
             "zoom_level": 8,
             "data_input_pattern": "data_*.parquet",
         }
 
         with (
-            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
             mock.patch.object(self.module, "load_statistics_runtime_config", return_value=runtime_cfg),
             mock.patch.object(self.module.os, "chdir"),
             mock.patch.object(self.module.os.path, "abspath", side_effect=lambda p: p),
@@ -588,3 +642,119 @@ class StatisticsGeographicLayersTests(unittest.TestCase):
             self.module.main()
 
         run_mock.assert_called_once()
+
+    def test_main_returns_when_filtered_input_directory_missing(self):
+        cfg = {
+            "params": {"seed": 42, "zoom_level": 8},
+            "paths": {
+                "osm_partitioned_dir": "/tmp/osm_partitioned",
+                "final_filtered_dir": "/tmp/final_filtered",
+                "stats_dir": "/tmp/stats",
+            },
+            "statistics": {
+                "geographic_layers": {
+                    "urban_area_cols": ["ID_HDC_G0", "agglosID"],
+                    "urban_area_layers": ["GHSL", "AFRICAPOLIS"],
+                    "max_workers": 4,
+                    "data_input_pattern": "data_*.parquet",
+                }
+            },
+        }
+
+        runtime_cfg = {
+            "seed": 42,
+            "urban_area_cols": ["ID_HDC_G0", "agglosID"],
+            "urban_area_layers": ["GHSL", "AFRICAPOLIS"],
+            "osm_distance": 15,
+            "pred_distance": 10,
+            "sigma": 1.0,
+            "score": 0.8,
+            "threshold": 0.3,
+            "max_workers": 4,
+            "osm_partitioned_dir": "/tmp/osm_partitioned",
+            "final_filtered_dir": "/tmp/final_filtered",
+            "results_dir": "/tmp/stats/geographic_layers",
+            "zoom_level": 8,
+            "data_input_pattern": "data_*.parquet",
+        }
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "abspath", side_effect=lambda p: p),
+            mock.patch.object(self.module.os.path, "isdir", return_value=False),
+            mock.patch.object(self.module.os, "listdir") as listdir_mock,
+            mock.patch.object(self.module.sys, "argv", ["statistics_geographic_layers.py"]),
+            mock.patch.object(self.module, "run_parallel_processing") as run_mock,
+        ):
+            self.module.main()
+
+        run_mock.assert_not_called()
+        listdir_mock.assert_not_called()
+
+    def test_main_handles_invalid_seed_value(self):
+        with (
+            mock.patch.object(self.module, "load_config", side_effect=ValueError("bad seed")),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "abspath", side_effect=lambda p: p),
+            mock.patch.object(self.module.os, "listdir", return_value=["tile=1"]),
+            mock.patch.object(self.module.os.path, "isdir", return_value=True),
+            mock.patch.object(self.module.sys, "argv", ["statistics_geographic_layers.py"]),
+            mock.patch.object(self.module, "run_parallel_processing") as run_mock,
+        ):
+            with self.assertRaises(ValueError):
+                self.module.main()
+
+        run_mock.assert_not_called()
+
+    def test_main_runs_unsharded_when_instances_non_positive(self):
+        cfg = {
+            "params": {"seed": 42, "zoom_level": 8},
+            "paths": {
+                "osm_partitioned_dir": "/tmp/osm_partitioned",
+                "final_filtered_dir": "/tmp/final_filtered",
+                "stats_dir": "/tmp/stats",
+            },
+            "statistics": {
+                "geographic_layers": {
+                    "urban_area_cols": ["ID_HDC_G0", "agglosID"],
+                    "urban_area_layers": ["GHSL", "AFRICAPOLIS"],
+                    "max_workers": 4,
+                    "data_input_pattern": "data_*.parquet",
+                }
+            },
+        }
+
+        runtime_cfg = {
+            "seed": 42,
+            "urban_area_cols": ["ID_HDC_G0", "agglosID"],
+            "urban_area_layers": ["GHSL", "AFRICAPOLIS"],
+            "osm_distance": 15,
+            "pred_distance": 10,
+            "sigma": 1.0,
+            "score": 0.8,
+            "threshold": 0.3,
+            "max_workers": 4,
+            "osm_partitioned_dir": "/tmp/osm_partitioned",
+            "final_filtered_dir": "/tmp/final_filtered",
+            "results_dir": "/tmp/stats/geographic_layers",
+            "zoom_level": 8,
+            "data_input_pattern": "data_*.parquet",
+        }
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "abspath", side_effect=lambda p: p),
+            mock.patch.object(self.module.os, "listdir", return_value=["tile=1", "tile=2"]),
+            mock.patch.object(self.module.os.path, "isdir", return_value=True),
+            mock.patch.object(self.module.sys, "argv", ["statistics_geographic_layers.py", "0", "0"]),
+            mock.patch.object(self.module, "run_parallel_processing") as run_mock,
+        ):
+            self.module.main()
+
+        run_mock.assert_called_once()
+        processed_dirs = run_mock.call_args[0][0]
+        self.assertEqual(len(processed_dirs), 2)

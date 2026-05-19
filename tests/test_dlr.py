@@ -12,6 +12,8 @@ RESEARCH_CODE_DIR = Path(__file__).resolve().parents[1] / "research_code"
 if str(RESEARCH_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(RESEARCH_CODE_DIR))
 
+import start as real_start
+
 
 # ---------------------------------------------------------------------------
 # Minimal test doubles
@@ -75,6 +77,7 @@ def import_dlr():
 
     fake_start = types.ModuleType("start")
     fake_start.load_config = lambda path=None: {}
+    fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
     with mock.patch.dict(
         sys.modules,
@@ -370,6 +373,7 @@ class DlrMainExecutionTests(unittest.TestCase):
             "metadata_params": {"retries": 2},
             "params": {"mly_key": "key"},
         }
+        fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
         modules = {
             "requests": fake_requests,

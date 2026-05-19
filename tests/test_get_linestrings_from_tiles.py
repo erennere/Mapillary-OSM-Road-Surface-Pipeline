@@ -12,6 +12,8 @@ RESEARCH_CODE_DIR = Path(__file__).resolve().parents[1] / "research_code"
 if str(RESEARCH_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(RESEARCH_CODE_DIR))
 
+import start as real_start
+
 
 class FakeRow:
     """Simulate a pandas-style row with dict-like access."""
@@ -78,6 +80,7 @@ def import_get_linestrings_module():
 
     fake_start = types.ModuleType("start")
     fake_start.load_config = lambda path=None: {}
+    fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
     with mock.patch.dict(
         sys.modules,
@@ -168,6 +171,44 @@ class GetLinestringsFromTilesTests(unittest.TestCase):
             gdf, failed = self.module.download_and_process_tile(row, "key", retries=retries)
 
         self.assertEqual(len(attempt_count), retries)
+        self.assertIsNone(gdf)
+        self.assertIs(failed, row)
+
+    def test_download_and_process_tile_normalizes_zero_retries_to_one_attempt(self):
+        row = FakeRow(x=1, y=2, z=8)
+        attempts = []
+
+        class AlwaysFailResponse:
+            status_code = 500
+            content = b"error"
+
+        def failing_get(url, **kwargs):
+            attempts.append(url)
+            return AlwaysFailResponse()
+
+        with mock.patch.object(self.module.requests, "get", side_effect=failing_get):
+            gdf, failed = self.module.download_and_process_tile(row, "key", retries=0)
+
+        self.assertEqual(len(attempts), 1)
+        self.assertIsNone(gdf)
+        self.assertIs(failed, row)
+
+    def test_download_and_process_tile_normalizes_invalid_retries_to_one_attempt(self):
+        row = FakeRow(x=1, y=2, z=8)
+        attempts = []
+
+        class AlwaysFailResponse:
+            status_code = 500
+            content = b"error"
+
+        def failing_get(url, **kwargs):
+            attempts.append(url)
+            return AlwaysFailResponse()
+
+        with mock.patch.object(self.module.requests, "get", side_effect=failing_get):
+            gdf, failed = self.module.download_and_process_tile(row, "key", retries="bad")
+
+        self.assertEqual(len(attempts), 1)
         self.assertIsNone(gdf)
         self.assertIs(failed, row)
 
@@ -273,6 +314,7 @@ class GetLinestringsMainTests(unittest.TestCase):
         fake_tqdm.tqdm = lambda iterable, **kwargs: iterable
         fake_start = types.ModuleType("start")
         fake_start.load_config = lambda path=None: self._cfg()
+        fake_start.__getattr__ = lambda name: getattr(real_start, name)
         return {
             "requests": fake_requests,
             "vt2geojson": fake_vt2geojson,
@@ -308,6 +350,43 @@ class GetLinestringsMainTests(unittest.TestCase):
             mock.patch("os.listdir", return_value=["tiles_z8.gpkg"]),
         ):
             runpy.run_module("get_linestrings_from_tiles", run_name="__main__")
+
+    def test_main_raises_when_metadata_params_missing(self):
+        cfg = {
+            "params": {"zoom_level": 8, "mly_key": "k"},
+            "paths": {
+                "tiles_save_dir": "/tmp/tiles",
+                "completed_tiles_dir": "/tmp/completed",
+                "failed_tiles_dir": "/tmp/failed",
+            },
+        }
+
+        fake_modules = self._fake_modules(lambda _p: None)
+        fake_modules["start"].load_config = lambda path=None: cfg
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.listdir", return_value=[]),
+        ):
+            with self.assertRaises(KeyError):
+                runpy.run_module("get_linestrings_from_tiles", run_name="__main__")
+
+    def test_main_raises_when_params_and_paths_sections_missing(self):
+        cfg = {}
+
+        fake_modules = self._fake_modules(lambda _p: None)
+        fake_modules["start"].load_config = lambda path=None: cfg
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.listdir", return_value=[]),
+        ):
+            with self.assertRaises(KeyError):
+                runpy.run_module("get_linestrings_from_tiles", run_name="__main__")
 
     def test_main_writes_both_completed_and_failed_outputs_when_both_exist(self):
         class MainGeoDf(FakeGeoDataFrame):
@@ -367,6 +446,7 @@ class GetLinestringsMainTests(unittest.TestCase):
 
         fake_start = types.ModuleType("start")
         fake_start.load_config = lambda path=None: self._cfg()
+        fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
         with (
             mock.patch.dict(
@@ -447,6 +527,7 @@ class GetLinestringsMainTests(unittest.TestCase):
 
         fake_start = types.ModuleType("start")
         fake_start.load_config = lambda path=None: self._cfg()
+        fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
         with (
             mock.patch.dict(

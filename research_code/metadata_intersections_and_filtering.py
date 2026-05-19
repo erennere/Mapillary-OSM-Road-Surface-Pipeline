@@ -31,7 +31,7 @@ from pygeodesy.simplify import simplify1,simplifyRDP
 from pygeodesy.points import Numpy2LatLon
 import duckdb
 from datetime import datetime
-from start import load_config
+from start import load_config, parse_int, require_path
 
 # Configure logging
 logging.basicConfig(
@@ -581,8 +581,6 @@ def main():
     cfg = load_config()
     logger.debug("Configuration loaded")
     
-    root = os.path.abspath(cfg['paths']['tile_partitioned_parquet_raw_metadata_dir'])
-    
     # Validate input argument
     if len(sys.argv) < 2:
         logger.error("Usage: python metadata_intersections_and_filtering.py <metadata_parquet_file>")
@@ -596,33 +594,43 @@ def main():
         logger.error(f"Could not extract tile id from filename: {metadata_filename}")
         sys.exit(1)
     logger.info(f"Processing metadata file: {metadata_filename} (tile: {tile})")
+
+    root = os.path.abspath(require_path(cfg, 'paths', 'tile_partitioned_parquet_raw_metadata_dir'))
     
     is_first = False
-    updated_after = datetime.fromisoformat(cfg['metadata_params']['updated_after'])
-    mtime = datetime.fromtimestamp(os.path.getmtime(metadata_filepath))  # file modification time
+    updated_after_value = require_path(cfg, 'metadata_params', 'updated_after')
+    try:
+        updated_after = datetime.fromisoformat(updated_after_value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid metadata_params.updated_after: {updated_after_value!r}")
+    try:
+        mtime = datetime.fromtimestamp(os.path.getmtime(metadata_filepath))  # file modification time
+    except OSError as err:
+        logger.warning(f"Skipping {metadata_filename}: could not stat input file {metadata_filepath}: {err}")
+        return
 
     if mtime < updated_after:
         logger.warning(f"Skipping {metadata_filename}: modification time {mtime} before {updated_after}")
         return
 
     # Load configuration parameters
-    zoom_level = cfg['params']['zoom_level']
-    urban_threshold = cfg['params']['urban_threshold']
-    rural_threshold = cfg['params']['rural_threshold']
+    zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
+    urban_threshold = parse_int(require_path(cfg, 'params', 'urban_threshold'), 'params.urban_threshold', min_value=0)
+    rural_threshold = parse_int(require_path(cfg, 'params', 'rural_threshold'), 'params.rural_threshold', min_value=0)
     logger.debug(f"Filters: urban={urban_threshold}m, rural={rural_threshold}m, zoom={zoom_level}")
 
-    continents_filename = cfg['filenames']['continents_filename']
-    overture_url = cfg['filenames']['overture_url']
-    country_filename = cfg['filenames']['country_filename']
-    ghsl_filename = cfg['filenames']['ghsl_filename']
-    africapolis_filename = cfg['filenames']['africapolis_filename']
-    continents_dir = os.path.abspath(cfg['paths']['continents_dir'])
+    continents_filename = require_path(cfg, 'filenames', 'continents_filename')
+    overture_url = require_path(cfg, 'filenames', 'overture_url')
+    country_filename = require_path(cfg, 'filenames', 'country_filename')
+    ghsl_filename = require_path(cfg, 'filenames', 'ghsl_filename')
+    africapolis_filename = require_path(cfg, 'filenames', 'africapolis_filename')
+    continents_dir = os.path.abspath(require_path(cfg, 'paths', 'continents_dir'))
     logger.debug(f"Filename paths: continents={continents_filename}, country={country_filename}")
 
-    ghsl_col_1 = cfg['params']['ghsl_col_1']
-    ghsl_col_2 = cfg['params']['ghsl_col_2']
-    africapolis_col_1 = cfg['params']['africapolis_col_1']
-    africapolis_col_2 = cfg['params']['africapolis_col_2']
+    ghsl_col_1 = require_path(cfg, 'params', 'ghsl_col_1')
+    ghsl_col_2 = require_path(cfg, 'params', 'ghsl_col_2')
+    africapolis_col_1 = require_path(cfg, 'params', 'africapolis_col_1')
+    africapolis_col_2 = require_path(cfg, 'params', 'africapolis_col_2')
     ghsl_string = f'{ghsl_col_1}, {ghsl_col_2}' if ghsl_col_2 else ghsl_col_1
     africapolis_string = f'{africapolis_col_1}, {africapolis_col_2}' if africapolis_col_2 else africapolis_col_1
 
@@ -639,17 +647,17 @@ def main():
             break
     
     logger.info("Preparing geographic layers")
-    processed_dir = cfg['paths']['processed_dir']
+    processed_dir = require_path(cfg, 'paths', 'processed_dir')
     urban_filepaths = layer_intersections(is_first, processed_dir, continents_dir, 
                                            continents_filename, country_filename,
                                             overture_url, ghsl_filename, africapolis_filename)
     logger.debug(f"Urban layer paths prepared: {urban_filepaths}")
   
     # Prepare output directories
-    unfiltered_dir = os.path.abspath(os.path.join(cfg['paths']['unfiltered_metadata_dir'], f'tile={tile}'))
-    filtered_dir = unfiltered_dir.replace('unfiltered', 'filtered')
+    unfiltered_dir = os.path.abspath(os.path.join(require_path(cfg, 'paths', 'unfiltered_metadata_dir'), f'tile={tile}'))
+    filtered_dir = os.path.abspath(os.path.join(require_path(cfg, 'paths', 'filtered_metadata_dir'), f'tile={tile}'))
     unfiltered_filename = os.path.join(unfiltered_dir, f'c_u_{metadata_filename}')
-    filtered_filename = unfiltered_filename.replace("unfiltered", "filtered")
+    filtered_filename = os.path.join(filtered_dir, f'c_u_{metadata_filename}')
     logger.info(f"Output directories: {unfiltered_dir}, {filtered_dir}")
     logger.info(f"Current working directory: {os.getcwd()}")
 

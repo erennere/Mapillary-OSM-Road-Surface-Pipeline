@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 import numpy as np
 import duckdb
-from start import load_config
+from start import load_config, parse_int, parse_iso_datetime, require_path
 
 def create_mask(distances,threshold_up=10, threshold_down=0):
     distances = np.array(distances)
@@ -151,21 +151,19 @@ def main():
         logging.error(f"Could not extract tile id from filename: {unfiltered_filename}")
         sys.exit(1)
 
-    osm_intersected_filedir = os.path.join(cfg['paths']['osm_intersections_dir'], f'tile={tile}')
-    nearest_root_dir = cfg['paths'].get('osm_nearest_line_dir', cfg['paths'].get('nearest_lines'))
-    if nearest_root_dir is None:
-        logging.error("Missing output path config: expected paths.osm_nearest_line_dir or paths.nearest_lines")
-        sys.exit(1)
+    osm_intersections_root = require_path(cfg, 'paths', 'osm_intersections_dir')
+    osm_intersected_filedir = os.path.join(osm_intersections_root, f'tile={tile}')
+    nearest_root_dir = require_path(cfg, 'paths', 'osm_nearest_line_dir')
     unfiltered_output_filedir = os.path.join(nearest_root_dir, f'tile={tile}')
 
-    threshold1 = cfg['params']['threshold_1']
-    threshold2 = cfg['params']['threshold_2']
+    threshold1 = parse_int(require_path(cfg, 'params', 'threshold_1'), 'params.threshold_1', min_value=0)
+    threshold2 = parse_int(require_path(cfg, 'params', 'threshold_2'), 'params.threshold_2', min_value=0)
 
     for output_filedir, filename in zip([unfiltered_output_filedir], [unfiltered_filename]):
         if not os.path.exists(output_filedir):
             os.makedirs(output_filedir,exist_ok=True)
 
-        updated_after = datetime.fromisoformat(cfg['metadata_params']['updated_after'])
+        updated_after = parse_iso_datetime(require_path(cfg, 'metadata_params', 'updated_after'), 'metadata_params.updated_after')
         input_filepath = os.path.join(osm_intersected_filedir, filename)
         if not os.path.exists(input_filepath):
             logging.warning(f"Skipping {filename}: missing input file {input_filepath}")

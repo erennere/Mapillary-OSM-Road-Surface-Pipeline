@@ -5,6 +5,9 @@
 #SBATCH --cpus-per-task=64
 #SBATCH --array=0-9
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
 # The task ID for this job array task
 TASK_ID=${SLURM_ARRAY_TASK_ID}
 

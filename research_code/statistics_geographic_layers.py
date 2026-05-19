@@ -19,51 +19,25 @@ import duckdb
 from shapely import to_wkb, box
 import mercantile
 
-from start import load_config
+from start import load_config, load_statistics_runtime_config, require_path, require_section
 
 # =========================
 # Runtime configuration
 # =========================
-urban_areas = []
-cols = []
-osm_distance = 15
-pred_distance = 10
-sigma = 1
-score = 0.8
-threshold = 0.3
-max_workers = 8
+def _apply_runtime_config(runtime_cfg):
+    global cols, urban_areas, osm_distance, pred_distance, sigma, score, threshold
+    global max_workers, results_dir, zoom_level
 
-zoom_level = 8
-results_dir = os.getcwd()
-
-def load_statistics_runtime_config(cfg):
-    """Return runtime settings for this module from config with safe defaults."""
-    stats_cfg = cfg.get('statistics', {})
-    geographic_cfg = stats_cfg.get('geographic_layers', {})
-
-    selected_results_dir = os.path.join(os.path.abspath(cfg['paths'].get('stats_dir')), 'geographic_layers')
-
-    max_workers = max(1, int(geographic_cfg.get('max_workers', 8)))
-
-    return {
-        'osm_distance': int(geographic_cfg.get('osm_distance', 15)),
-        'pred_distance': int(geographic_cfg.get('pred_distance', 10)),
-        'sigma': float(geographic_cfg.get('sigma', 1)),
-        'score': float(geographic_cfg.get('score', 0.8)),
-        'threshold': float(geographic_cfg.get('threshold', 0.3)),
-        'max_workers': max_workers,
-        'data_input_pattern': geographic_cfg.get('data_input_pattern', 'data_*.parquet'),
-        'results_dir': selected_results_dir,
-        'urban_area_layers': geographic_cfg.get(
-            'urban_area_layers',
-            [
-                'GHS_STAT_UCDB2015MT_GLOBE_R2019A',
-                'AFRICAPOLIS2020',
-            ],
-        ),
-        'urban_area_cols': geographic_cfg.get('urban_area_cols', ['ID_HDC_G0', 'agglosID']),
-        'zoom_level': int(cfg['params'].get('zoom_level', 8)),
-    }
+    cols = runtime_cfg['urban_area_cols']
+    urban_areas = runtime_cfg['urban_area_layers']
+    osm_distance = runtime_cfg['osm_distance']
+    pred_distance = runtime_cfg['pred_distance']
+    sigma = runtime_cfg['sigma']
+    score = runtime_cfg['score']
+    threshold = runtime_cfg['threshold']
+    max_workers = runtime_cfg['max_workers']
+    results_dir = runtime_cfg['results_dir']
+    zoom_level = runtime_cfg['zoom_level']
 
 # =========================
 # SQL fragment builders
@@ -243,28 +217,14 @@ def create_surface_urban_rural_strings(
     return ",\n".join(parts)
 
 
-def build_metric_catalog(statistics_cfg=None):
+def build_metric_catalog(statistics_cfg):
     """Build shared metric lists and labels used by aggregation queries."""
-    shared_cfg = (statistics_cfg or {}).get('shared', {})
+    shared_cfg = require_section(statistics_cfg, 'shared')
 
-    highways = shared_cfg.get(
-        'highways',
-        ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential'],
-    )
-    areas = shared_cfg.get('areas', ['urban', 'rural'])
-    road_types = shared_cfg.get('road_types', ['paved', 'unpaved'])
-    road_classes = shared_cfg.get(
-        'road_classes',
-        {
-            'motorway': ['motorway', 'motorway_link'],
-            'trunk': ['trunk', 'trunk_link'],
-            'primary': ['primary', 'primary_link'],
-            'secondary': ['secondary', 'secondary_link'],
-            'tertiary': ['tertiary', 'tertiary_link'],
-            'unclassified': ['unclassified'],
-            'residential': ['residential'],
-        },
-    )
+    highways = require_path(shared_cfg, 'highways')
+    areas = require_path(shared_cfg, 'areas')
+    road_types = require_path(shared_cfg, 'road_types')
+    road_classes = require_path(shared_cfg, 'road_classes')
 
     length_tags = []
     pred_length_tags = []
@@ -383,11 +343,9 @@ def correct_z14_tiles_osm(z14_list):
 # =========================
 # Metric catalogs
 # =========================
-try:
-    _BOOT_CFG = load_config()
-    _METRICS = build_metric_catalog(_BOOT_CFG.get('statistics', {}))
-except Exception:
-    _METRICS = build_metric_catalog()
+_BOOT_CFG = load_config()
+_apply_runtime_config(_BOOT_CFG)
+_METRICS = build_metric_catalog(require_section(_BOOT_CFG, 'statistics'))
 
 highways = _METRICS['highways']
 areas = _METRICS['areas']
@@ -2315,36 +2273,39 @@ def run_parallel_processing(file_dirs, cols, urban_areas, osm_input_filedir, dat
 
 def main():
     """Run either single-path processing or chunked parallel processing."""
-    global cols, urban_areas, osm_distance, pred_distance, sigma, score, threshold
-    global max_workers, results_dir, zoom_level
-
     os.chdir(os.path.abspath(os.path.dirname(__file__)))
     cfg = load_config()
-    seed = int(cfg['params']['seed'])
-    stats_runtime_cfg = load_statistics_runtime_config(cfg)
+    seed = cfg['seed']
+    _apply_runtime_config(cfg)
 
-    cols = stats_runtime_cfg['urban_area_cols']
-    urban_areas = stats_runtime_cfg['urban_area_layers']
-    osm_distance = stats_runtime_cfg['osm_distance']
-    pred_distance = stats_runtime_cfg['pred_distance']
-    sigma = stats_runtime_cfg['sigma']
-    score = stats_runtime_cfg['score']
-    threshold = stats_runtime_cfg['threshold']
-    max_workers = stats_runtime_cfg['max_workers']
-    results_dir = os.path.abspath(stats_runtime_cfg['results_dir'])
-    zoom_level = stats_runtime_cfg['zoom_level']
-    
-    osm_input_filedir = os.path.abspath(cfg["paths"]["osm_partitioned_dir"])
-    filtered_dir = os.path.abspath(cfg['paths']['final_filtered_dir'])
-    data_input_filepath = stats_runtime_cfg['data_input_pattern']
+    osm_input_filedir = cfg['osm_partitioned_dir']
+    filtered_dir = cfg['final_filtered_dir']
+    data_input_filepath = cfg['data_input_pattern']
+    if not os.path.isdir(filtered_dir):
+        logging.warning(f"Skipping run: filtered input directory not found at {filtered_dir}")
+        return
     file_dirs = [os.path.join(filtered_dir, d) for d in os.listdir(filtered_dir) if os.path.isdir(os.path.join(filtered_dir, d))]
     
     if len(sys.argv) > 2:
-        index = int(sys.argv[1])
-        instances = int(sys.argv[2])
+        try:
+            index = int(sys.argv[1])
+            instances = int(sys.argv[2])
+        except ValueError:
+            logging.warning("Invalid sharding arguments; expected integers for index and instances. Running unsharded.")
+            index = None
+            instances = None
+        if instances is not None and instances <= 0:
+            logging.warning("Invalid sharding arguments; instances must be > 0. Running unsharded.")
+            index = None
+            instances = None
+        if index is not None and index < 0:
+            logging.warning("Invalid sharding arguments; index must be >= 0. Running unsharded.")
+            index = None
+            instances = None
         random.seed(seed)
         random.shuffle(file_dirs)
-        file_dirs = file_dirs[index::instances]
+        if index is not None and instances is not None:
+            file_dirs = file_dirs[index::instances]
     # FIX [D-1]: Execute processing in both sharded and default modes.
     run_parallel_processing(file_dirs, cols, urban_areas, osm_input_filedir, data_input_filepath,
                             sigma, score, threshold, results_dir, osm_distance, pred_distance, max_workers)

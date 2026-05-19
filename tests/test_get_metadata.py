@@ -12,6 +12,8 @@ RESEARCH_CODE_DIR = Path(__file__).resolve().parents[1] / "research_code"
 if str(RESEARCH_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(RESEARCH_CODE_DIR))
 
+import start as real_start
+
 
 class FakeSeries:
     """Minimal Series-like object."""
@@ -86,6 +88,7 @@ def import_get_metadata_module():
     fake_metadata_download.get_metadata = lambda *args, **kwargs: None
     fake_start = types.ModuleType("start")
     fake_start.load_config = lambda path=None: {}
+    fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
     with mock.patch.dict(
         sys.modules,
@@ -275,6 +278,10 @@ class GetMetadataMainTests(unittest.TestCase):
                 "sleep_time": 1,
                 "missing_attempts": 2,
                 "file_age_threshold_seconds": 123,
+                "monitor_interval": 10,
+                "monitor_check_timeout": 10,
+                "write_interval": 300,
+                "write_check_timeout": 10,
             },
             "paths": {
                 "raw_metadata_dir": "/tmp/raw_meta",
@@ -343,7 +350,7 @@ class GetMetadataMainTests(unittest.TestCase):
         self.assertEqual(set(processed_tiles[:4]), {"tile-0", "tile-1", "tile-2", "tile-3"})
         self.assertEqual(processed_tiles[:4], processed_tiles[4:8])
 
-    def test_main_normalizes_zero_missing_attempts_to_one(self):
+    def test_main_raises_when_missing_attempts_is_zero(self):
         cfg = self._build_config()
         cfg["metadata_params"]["missing_attempts"] = 0
 
@@ -365,10 +372,10 @@ class GetMetadataMainTests(unittest.TestCase):
             mock.patch.object(self.module.random, "shuffle", side_effect=lambda x: None),
             mock.patch.dict(self.module.os.environ, {}, clear=True),
         ):
-            self.module.main()
+            with self.assertRaises(ValueError):
+                self.module.main()
 
-        self.assertEqual(len(processed_tiles), 2)
-        self.assertEqual(set(processed_tiles), {"tile-0", "tile-1"})
+        self.assertEqual(len(processed_tiles), 0)
 
     def test_main_creates_output_directory_when_missing(self):
         cfg = self._build_config()
@@ -405,3 +412,57 @@ class GetMetadataMainTests(unittest.TestCase):
             self.module.main()
 
         makedirs_mock.assert_called_once_with(raw_dir, exist_ok=True)
+
+    def test_main_falls_back_to_config_max_workers_when_slurm_env_invalid(self):
+        cfg = self._build_config()
+        cfg["metadata_params"]["max_workers"] = 3
+        tiles_rows = [{"id": "seq0", "z8_tiles": "tile-0"}]
+        fake_gdf = FakeTilesGdf("z8_tiles", tiles_rows)
+
+        captured = {}
+
+        def fake_process_single_tile(tile, tiles_gdf, tiles_col, data_dir, metadata_args):
+            captured["max_workers"] = metadata_args["max_workers"]
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["get_metadata.py"]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.gpd, "read_file", return_value=fake_gdf, create=True),
+            mock.patch.object(self.module, "process_single_tile", side_effect=fake_process_single_tile),
+            mock.patch.object(self.module.random, "shuffle", side_effect=lambda x: None),
+            mock.patch.dict(self.module.os.environ, {"SLURM_CPUS_PER_TASK": "not-an-int"}, clear=True),
+        ):
+            self.module.main()
+
+        self.assertEqual(captured["max_workers"], 3)
+
+    def test_main_raises_when_config_numeric_values_invalid(self):
+        cfg = self._build_config()
+        cfg["metadata_params"]["max_workers"] = "bad"
+        cfg["metadata_params"]["missing_attempts"] = "bad"
+        tiles_rows = [{"id": "seq0", "z8_tiles": "tile-0"}]
+        fake_gdf = FakeTilesGdf("z8_tiles", tiles_rows)
+
+        processed_tiles = []
+        captured = {}
+
+        def fake_process_single_tile(tile, tiles_gdf, tiles_col, data_dir, metadata_args):
+            processed_tiles.append(tile)
+            captured["max_workers"] = metadata_args["max_workers"]
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["get_metadata.py"]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.gpd, "read_file", return_value=fake_gdf, create=True),
+            mock.patch.object(self.module, "process_single_tile", side_effect=fake_process_single_tile),
+            mock.patch.object(self.module.random, "shuffle", side_effect=lambda x: None),
+            mock.patch.dict(self.module.os.environ, {}, clear=True),
+        ):
+            with self.assertRaises(ValueError):
+                self.module.main()
+
+        self.assertEqual(len(processed_tiles), 0)

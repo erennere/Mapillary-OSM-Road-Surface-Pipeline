@@ -46,7 +46,7 @@ from vt2geojson import tools as vt2geojson_tools
 import geopandas as gpd
 import pandas as pd
 from tqdm import tqdm
-from start import load_config
+from start import load_config, parse_int, require_path
 
 # Configure logging
 logging.basicConfig(
@@ -83,6 +83,12 @@ def download_and_process_tile(row, mly_key, retries=3):
     url = f"https://tiles.mapillary.com/maps/vtp/{endpoint}/2/{z}/{x}/{y}?access_token={mly_key}"
     
     logging.debug(f"Attempting to download tile z{z}/x{x}/y{y}")
+
+    try:
+        retries = max(1, int(retries))
+    except (TypeError, ValueError):
+        logging.warning(f"Invalid retries value {retries!r}; defaulting to 1")
+        retries = 1
     
     attempt = 0
     while attempt < retries:
@@ -162,13 +168,13 @@ if __name__ == "__main__":
     cfg = load_config()
     logging.info("Configuration loaded successfully")
 
-    retries = cfg['metadata_params']['retries']
-    zoom_level = cfg['params']['zoom_level']
-    mly_key = cfg['params']['mly_key']
+    retries = parse_int(require_path(cfg, 'metadata_params', 'retries'), 'metadata_params.retries', min_value=1)
+    zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
+    mly_key = require_path(cfg, 'params', 'mly_key')
 
-    tiles_save_dir = os.path.abspath(cfg['paths']['tiles_save_dir'])
-    completed_tiles_dir = os.path.abspath(cfg['paths']['completed_tiles_dir'])
-    failed_tiles_dir = os.path.abspath(cfg['paths']['failed_tiles_dir'])
+    tiles_save_dir = os.path.abspath(require_path(cfg, 'paths', 'tiles_save_dir'))
+    completed_tiles_dir = os.path.abspath(require_path(cfg, 'paths', 'completed_tiles_dir'))
+    failed_tiles_dir = os.path.abspath(require_path(cfg, 'paths', 'failed_tiles_dir'))
     
     logging.debug(f"Zoom level: {zoom_level}, Retries: {retries}")
     logging.debug(f"Input dir: {tiles_save_dir}")

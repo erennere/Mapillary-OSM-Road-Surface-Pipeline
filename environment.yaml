@@ -1,0 +1,23 @@
+name: mapillary-road-surface-pipeline
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - aiohttp
+  - duckdb
+  - gdal
+  - geopandas
+  - mercantile
+  - numpy
+  - opencv
+  - pandas
+  - pyarrow
+  - pygeodesy
+  - pytest
+  - pyyaml
+  - requests
+  - shapely
+  - tqdm
+  - pip:
+      - vt2geojson

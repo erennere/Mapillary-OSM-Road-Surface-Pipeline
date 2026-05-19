@@ -1,6 +1,7 @@
 import importlib
 import os
 import random
+import runpy
 import sys
 import types
 import unittest
@@ -11,6 +12,8 @@ from unittest import mock
 RESEARCH_CODE_DIR = Path(__file__).resolve().parents[1] / "research_code"
 if str(RESEARCH_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(RESEARCH_CODE_DIR))
+
+import start as real_start
 
 
 def import_statistics_aggregation_module():
@@ -53,7 +56,8 @@ def import_statistics_aggregation_module():
     fake_shapely.box = lambda *args: args
 
     fake_start = types.ModuleType("start")
-    fake_start.load_config = lambda path=None: {}
+    fake_start.load_config = lambda path=None: {"statistics": {}}
+    fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
     # Provide a fake statistics_geographic_layers with all symbols that
     # statistics_aggregation imports at module level, including zoom_level in
@@ -157,14 +161,17 @@ class BuildRuntimeConfigTests(unittest.TestCase):
                     "max_workers": max_workers,
                     "number_of_cpus": n_cpus,
                     "memory_limit_gb": mem_limit,
+                    "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+                    "process_non_temporal_osm": False,
+                },
+                "geographic_layers": {
+                    "urban_area_layers": ["GHS_STAT_UCDB2015MT_GLOBE_R2019A", "AFRICAPOLIS2020"]
                 }
             },
-            "geographic_layers": {
-                "urban_area_layers": ["GHS_STAT_UCDB2015MT_GLOBE_R2019A", "AFRICAPOLIS2020"]
-            },
+            "params": {"zoom_level": 8},
         }
 
-        result = self.module.build_runtime_config(cfg)
+        result = self.module.load_statistics_aggregation_runtime_config(cfg)
 
         self.assertIn("results_dir", result)
         expected_suffix = os.path.normpath(os.path.join(stats_dir, "geographic_layers"))
@@ -199,14 +206,18 @@ class BuildRuntimeConfigTests(unittest.TestCase):
                 "aggregation": {
                     "max_workers": max_workers,
                     "number_of_cpus": n_cpus,
+                    "memory_limit_gb": 128,
+                    "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+                    "process_non_temporal_osm": False,
+                },
+                "geographic_layers": {
+                    "urban_area_layers": []
                 }
             },
-            "geographic_layers": {
-                "urban_area_layers": []
-            },
+            "params": {"zoom_level": 8},
         }
 
-        result = self.module.build_runtime_config(cfg)
+        result = self.module.load_statistics_aggregation_runtime_config(cfg)
 
         self.assertEqual(result["sub_threads"], n_cpus // max_workers)
 
@@ -229,17 +240,166 @@ class BuildRuntimeConfigTests(unittest.TestCase):
                 "aggregation": {
                     "max_workers": 0,
                     "number_of_cpus": 8,
+                    "memory_limit_gb": 128,
+                    "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+                    "process_non_temporal_osm": False,
+                },
+                "geographic_layers": {
+                    "urban_area_layers": []
                 }
             },
-            "geographic_layers": {
-                "urban_area_layers": []
+            "params": {"zoom_level": 8},
+        }
+
+        with self.assertRaises(ValueError):
+            self.module.load_statistics_aggregation_runtime_config(cfg)
+
+    def test_build_runtime_config_raises_on_missing_geographic_layers_section(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/s",
+                "osm_saving_dir": "/tmp/o",
+                "processed_dir": "/tmp/p",
+                "continents_dir": "/tmp/c",
+            },
+            "filenames": {
+                "continents_filename": "c.parquet",
+                "country_filename": "co.parquet",
+                "ghsl_filename": "g.gpkg",
+                "africapolis_filename": "a.shp",
+                "overture_url": "s3://bucket",
+            },
+            "statistics": {
+                "aggregation": {
+                    "max_workers": 2,
+                    "number_of_cpus": 8,
+                    "memory_limit_gb": 128,
+                    "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+                    "process_non_temporal_osm": False,
+                }
             },
         }
 
-        result = self.module.build_runtime_config(cfg)
+        with self.assertRaises(KeyError):
+            self.module.load_statistics_aggregation_runtime_config(cfg)
 
-        self.assertEqual(result["max_workers"], 1)
-        self.assertEqual(result["sub_threads"], 8)
+    def test_build_runtime_config_raises_on_invalid_numeric_values(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/s",
+                "osm_saving_dir": "/tmp/o",
+                "processed_dir": "/tmp/p",
+                "continents_dir": "/tmp/c",
+            },
+            "filenames": {
+                "continents_filename": "c.parquet",
+                "country_filename": "co.parquet",
+                "ghsl_filename": "g.gpkg",
+                "africapolis_filename": "a.shp",
+                "overture_url": "s3://bucket",
+            },
+            "statistics": {
+                "aggregation": {
+                    "max_workers": "bad",
+                    "number_of_cpus": "bad",
+                    "memory_limit_gb": None,
+                    "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+                    "process_non_temporal_osm": False,
+                },
+                "geographic_layers": {
+                    "urban_area_layers": []
+                }
+            },
+            "params": {"zoom_level": 8},
+        }
+
+        with self.assertRaises(ValueError):
+            self.module.load_statistics_aggregation_runtime_config(cfg)
+
+    def test_build_runtime_config_raises_on_missing_paths_and_filenames_sections(self):
+        cfg = {
+            "statistics": {
+                "aggregation": {
+                    "max_workers": 2,
+                    "number_of_cpus": 8,
+                    "memory_limit_gb": 128,
+                    "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+                    "process_non_temporal_osm": False,
+                },
+                "geographic_layers": {
+                    "urban_area_layers": []
+                }
+            },
+            "params": {"zoom_level": 8},
+        }
+
+        with self.assertRaises(KeyError):
+            self.module.load_statistics_aggregation_runtime_config(cfg)
+
+    def test_build_runtime_config_raises_on_invalid_zoom_level(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/s",
+                "osm_saving_dir": "/tmp/o",
+                "processed_dir": "/tmp/p",
+            },
+            "filenames": {
+                "continents_filename": "c.parquet",
+                "country_filename": "co.parquet",
+                "ghsl_filename": "g.gpkg",
+                "africapolis_filename": "a.shp",
+            },
+            "params": {
+                "zoom_level": "bad",
+            },
+            "statistics": {
+                "aggregation": {
+                    "max_workers": 2,
+                    "number_of_cpus": 8,
+                    "memory_limit_gb": 128,
+                    "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+                    "process_non_temporal_osm": False,
+                },
+                "geographic_layers": {
+                    "urban_area_layers": []
+                }
+            },
+        }
+
+        with self.assertRaises(ValueError):
+            self.module.load_statistics_aggregation_runtime_config(cfg)
+
+    def test_build_runtime_config_includes_process_non_temporal_osm_flag(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/s",
+                "osm_saving_dir": "/tmp/o",
+                "processed_dir": "/tmp/p",
+            },
+            "filenames": {
+                "continents_filename": "c.parquet",
+                "country_filename": "co.parquet",
+                "ghsl_filename": "g.gpkg",
+                "africapolis_filename": "a.shp",
+            },
+            "statistics": {
+                "aggregation": {
+                    "max_workers": 2,
+                    "number_of_cpus": 8,
+                    "memory_limit_gb": 128,
+                    "urban_layer_cols": ["ID_HDC_G0", "agglosID"],
+                    "process_non_temporal_osm": True,
+                },
+                "geographic_layers": {
+                    "urban_area_layers": []
+                }
+            },
+            "params": {"zoom_level": 8},
+        }
+
+        result = self.module.load_statistics_aggregation_runtime_config(cfg)
+
+        self.assertTrue(result["process_non_temporal_osm"])
 
 
 class BuildQueriesTests(unittest.TestCase):
@@ -507,6 +667,60 @@ class ProcessOsmChunkTests(unittest.TestCase):
         expected = len([c for c in countries if c not in none_countries])
         self.assertEqual(len(results), expected)
 
+    def test_series_input_also_works(self):
+        gen = random.Random(1213)
+        countries = [f"S{i}" for i in range(gen.randint(2, 4))]
+        pattern = "/data/osm_series.parquet"
+
+        called = []
+        fake_result = type("DF", (), {"empty": False})()
+
+        def fake_process(country, pat, conn):
+            called.append(country)
+            return fake_result
+
+        with mock.patch.object(self.module, "process_osm_by_country", side_effect=fake_process):
+            results = self.module.process_osm_chunk(self.module.pd.Series(countries), pattern, None)
+
+        self.assertEqual(sorted(called), sorted(countries))
+        self.assertEqual(len(results), len(countries))
+
+    def test_dataframe_input_branch_is_used(self):
+        gen = random.Random(1214)
+        countries = [f"DF{i}" for i in range(gen.randint(2, 4))]
+
+        class FakeDf(self.module.pd.DataFrame):
+            def __init__(self, countries):
+                self._countries = countries
+
+            @property
+            def iloc(self):
+                class _Iloc:
+                    def __init__(self, countries):
+                        self._countries = countries
+
+                    def __getitem__(self, key):
+                        return type("Col", (), {
+                            "dropna": lambda s: s,
+                            "unique": lambda s: list(dict.fromkeys(s._countries)),
+                            "_countries": self._countries,
+                        })()
+
+                return _Iloc(self._countries)
+
+        called = []
+        fake_result = type("DF", (), {"empty": False})()
+
+        def fake_process(country, pat, conn):
+            called.append(country)
+            return fake_result
+
+        with mock.patch.object(self.module, "process_osm_by_country", side_effect=fake_process):
+            results = self.module.process_osm_chunk(FakeDf(countries * 2), "/tmp/osm.parquet", None)
+
+        self.assertEqual(sorted(called), sorted(countries))
+        self.assertEqual(len(results), len(countries))
+
 
 # ---------------------------------------------------------------------------
 # process_urban_areas
@@ -689,6 +903,129 @@ class OrchestrationAndMainTests(unittest.TestCase):
         self.assertIn("t1.db", calls["removed"])
         self.assertIn("t2.db", calls["removed"])
 
+    def test_orchestrate_osm_processing_appends_csv_when_output_exists(self):
+        class FakeConn:
+            def close(self):
+                pass
+
+        class FakeFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self):
+                return self._value
+
+        class FakeExecutor:
+            def __init__(self, max_workers=None):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, *args):
+                fake_result = type("DF", (), {"empty": False})()
+                return FakeFuture([fake_result])
+
+        class FakeCountries:
+            def unique(self):
+                return ["A", "B"]
+
+        class FakeCountriesDf:
+            country = FakeCountries()
+
+        fake_rng = type("Rng", (), {"shuffle": lambda self, x: None})()
+        csv_calls = []
+
+        class FakeConcatResult:
+            def to_csv(self, *args, **kwargs):
+                csv_calls.append(kwargs)
+
+        with (
+            mock.patch.object(self.module.np, "random", types.SimpleNamespace(default_rng=lambda seed: fake_rng), create=True),
+            mock.patch.object(self.module.np, "array_split", side_effect=lambda arr, n: [["A"], ["B"]], create=True),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn(), FakeConn()], ["t1.db", "t2.db"])),
+            mock.patch.object(self.module, "ProcessPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "as_completed", side_effect=lambda futures: futures),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: str(p).endswith(".csv") or str(p).endswith(".db")),
+            mock.patch.object(self.module.os, "remove"),
+            mock.patch.object(self.module.pd, "concat", return_value=FakeConcatResult(), create=True),
+        ):
+            self.module.orchestrate_osm_processing(
+                countries_df=FakeCountriesDf(),
+                output_filepath="/tmp/out.csv",
+                osm_file_pattern="/tmp/osm_*.parquet",
+                max_workers=2,
+                sub_threads=1,
+            )
+
+        self.assertTrue(csv_calls)
+        self.assertEqual(csv_calls[0].get("mode"), "a")
+        self.assertEqual(csv_calls[0].get("header"), False)
+
+    def test_orchestrate_osm_processing_writes_new_csv_when_output_missing(self):
+        class FakeConn:
+            def close(self):
+                pass
+
+        class FakeFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self):
+                return self._value
+
+        class FakeExecutor:
+            def __init__(self, max_workers=None):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, *args):
+                fake_result = type("DF", (), {"empty": False})()
+                return FakeFuture([fake_result])
+
+        class FakeCountries:
+            def unique(self):
+                return ["A"]
+
+        class FakeCountriesDf:
+            country = FakeCountries()
+
+        fake_rng = type("Rng", (), {"shuffle": lambda self, x: None})()
+        csv_calls = []
+
+        class FakeConcatResult:
+            def to_csv(self, *args, **kwargs):
+                csv_calls.append(kwargs)
+
+        with (
+            mock.patch.object(self.module.np, "random", types.SimpleNamespace(default_rng=lambda seed: fake_rng), create=True),
+            mock.patch.object(self.module.np, "array_split", side_effect=lambda arr, n: [["A"]], create=True),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["t1.db"])),
+            mock.patch.object(self.module, "ProcessPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "as_completed", side_effect=lambda futures: futures),
+            mock.patch.object(self.module.os.path, "exists", side_effect=lambda p: str(p).endswith(".db")),
+            mock.patch.object(self.module.os, "remove"),
+            mock.patch.object(self.module.pd, "concat", return_value=FakeConcatResult(), create=True),
+        ):
+            self.module.orchestrate_osm_processing(
+                countries_df=FakeCountriesDf(),
+                output_filepath="/tmp/new_out.csv",
+                osm_file_pattern="/tmp/osm_*.parquet",
+                max_workers=1,
+                sub_threads=1,
+            )
+
+        self.assertTrue(csv_calls)
+        self.assertNotIn("mode", csv_calls[0])
+
     def test_main_executes_queries_and_urban_processing(self):
         cfg = {
             "paths": {
@@ -709,6 +1046,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
             "number_of_cpus": 4,
             "memory_limit_gb": 16,
             "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "process_non_temporal_osm": False,
         }
 
         class FakeConn:
@@ -724,8 +1063,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
         fake_conn = FakeConn()
 
         with (
-            mock.patch.object(self.module, "load_config", return_value=cfg),
-            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
             mock.patch.object(self.module.os, "makedirs"),
             mock.patch.object(self.module, "build_queries", return_value=["Q1", "Q2"]),
             mock.patch.object(self.module, "create_connections", return_value=([fake_conn], ["temp.db"])),
@@ -738,6 +1077,59 @@ class OrchestrationAndMainTests(unittest.TestCase):
         self.assertEqual(fake_conn.executed, ["Q1", "Q2"])
         urban_mock.assert_called_once()
         remove_mock.assert_called_once_with("temp.db")
+
+    def test_main_runs_non_temporal_osm_rollup_when_enabled(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": [],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": [],
+            "urban_layer_cols": [],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "max_workers": 2,
+            "sub_threads": 2,
+            "process_non_temporal_osm": True,
+        }
+
+        class FakeConn:
+            def execute(self, _q):
+                return None
+
+            def close(self):
+                return None
+
+        class FakeDuckResult:
+            def df(self):
+                return object()
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.duckdb, "execute", return_value=FakeDuckResult(), create=True),
+            mock.patch.object(self.module, "orchestrate_osm_processing") as rollup_mock,
+            mock.patch.object(self.module, "build_queries", return_value=[]),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas"),
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "remove"),
+        ):
+            self.module.main()
+
+        rollup_mock.assert_called_once()
 
     def test_main_uses_urban_areas_dir_for_urban_filepaths(self):
         cfg = {
@@ -759,6 +1151,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
             "number_of_cpus": 4,
             "memory_limit_gb": 16,
             "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "process_non_temporal_osm": False,
         }
 
         class FakeConn:
@@ -769,8 +1163,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
                 return None
 
         with (
-            mock.patch.object(self.module, "load_config", return_value=cfg),
-            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
             mock.patch.object(self.module.os, "makedirs"),
             mock.patch.object(self.module, "build_queries", return_value=[]),
             mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
@@ -805,6 +1199,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
             "number_of_cpus": 4,
             "memory_limit_gb": 16,
             "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "process_non_temporal_osm": False,
         }
 
         class FakeConn:
@@ -815,8 +1211,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
                 return None
 
         with (
-            mock.patch.object(self.module, "load_config", return_value=cfg),
-            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
             mock.patch.object(self.module.os, "makedirs"),
             mock.patch.object(self.module, "build_queries", return_value=[]),
             mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
@@ -853,6 +1249,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
             "number_of_cpus": 4,
             "memory_limit_gb": 16,
             "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "process_non_temporal_osm": False,
         }
 
         class FakeConn:
@@ -868,8 +1266,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
         fake_conn = FakeConn()
 
         with (
-            mock.patch.object(self.module, "load_config", return_value=cfg),
-            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
             mock.patch.object(self.module.os, "makedirs"),
             mock.patch.object(self.module, "build_queries", return_value=["Q1"]),
             mock.patch.object(self.module, "create_connections", return_value=([fake_conn], ["temp.db"])),
@@ -903,6 +1301,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
             "number_of_cpus": 4,
             "memory_limit_gb": 16,
             "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "process_non_temporal_osm": False,
         }
 
         class FakeConn:
@@ -913,8 +1313,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
                 return None
 
         with (
-            mock.patch.object(self.module, "load_config", return_value=cfg),
-            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
             mock.patch.object(self.module.os, "makedirs"),
             mock.patch.object(self.module, "build_queries", return_value=[]),
             mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
@@ -951,6 +1351,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
             "number_of_cpus": 4,
             "memory_limit_gb": 16,
             "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "process_non_temporal_osm": False,
         }
 
         class FakeConn:
@@ -961,8 +1363,8 @@ class OrchestrationAndMainTests(unittest.TestCase):
                 return None
 
         with (
-            mock.patch.object(self.module, "load_config", return_value=cfg),
-            mock.patch.object(self.module, "build_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
             mock.patch.object(self.module.os, "makedirs"),
             mock.patch.object(self.module, "build_queries", return_value=[]),
             mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
@@ -978,3 +1380,200 @@ class OrchestrationAndMainTests(unittest.TestCase):
         self.assertEqual(len(urban_args[2]), 1)
         self.assertEqual(len(urban_args[3]), 1)
         self.assertEqual(len(urban_args[4]), 1)
+
+    def test_main_skips_temp_file_removal_when_temp_db_missing(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": [],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": [],
+            "urban_layer_cols": [],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "process_non_temporal_osm": False,
+        }
+
+        class FakeConn:
+            def execute(self, _q):
+                return None
+
+            def close(self):
+                return None
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "build_queries", return_value=[]),
+            mock.patch.object(self.module, "create_connections", return_value=([FakeConn()], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas"),
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            self.module.main()
+
+        remove_mock.assert_not_called()
+
+    def test_main_skips_close_when_connection_is_none_and_temp_missing(self):
+        cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "processed_dir": "/tmp/processed",
+            }
+        }
+
+        runtime_cfg = {
+            "results_dir": "/tmp/stats/geographic_layers",
+            "results_dir_compiled": "/tmp/stats/summary",
+            "urban_areas": [],
+            "osm_file_pattern": "/tmp/osm/*.parquet",
+            "country_layer": "/tmp/processed/intersected_country.parquet",
+            "continent_layer": "/tmp/processed/continents.parquet",
+            "urban_layers": [],
+            "urban_layer_cols": [],
+            "number_of_cpus": 4,
+            "memory_limit_gb": 16,
+            "urban_areas_dir": "/tmp/processed",
+            "zoom_level": 8,
+            "process_non_temporal_osm": False,
+        }
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=runtime_cfg),
+            mock.patch.object(self.module, "load_statistics_aggregation_runtime_config", return_value=runtime_cfg),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "build_queries", return_value=[]),
+            mock.patch.object(self.module, "create_connections", return_value=([None], ["temp.db"])),
+            mock.patch.object(self.module, "process_urban_areas"),
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            self.module.main()
+
+        remove_mock.assert_not_called()
+
+
+class StatisticsAggregationEntrypointTests(unittest.TestCase):
+    def test_module_entrypoint_executes_main_when_run_as_script(self):
+        fake_duckdb = types.ModuleType("duckdb")
+
+        class FakeConn:
+            def execute(self, _q):
+                return None
+
+            def create_function(self, *args, **kwargs):
+                return None
+
+            def close(self):
+                return None
+
+        fake_duckdb.connect = lambda *args, **kwargs: FakeConn()
+        fake_duckdb.execute = lambda *args, **kwargs: type("R", (), {"df": lambda self: object()})()
+
+        fake_numpy = types.ModuleType("numpy")
+        fake_numpy.array_split = lambda values, n: [values]
+
+        fake_pandas = types.ModuleType("pandas")
+
+        class _FakeDataFrame:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            @property
+            def empty(self):
+                return True
+
+            def to_csv(self, *args, **kwargs):
+                return None
+
+        fake_pandas.DataFrame = _FakeDataFrame
+        fake_pandas.concat = lambda *args, **kwargs: _FakeDataFrame()
+        fake_pandas.Series = list
+
+        fake_mercantile = types.ModuleType("mercantile")
+        fake_mercantile.bounds = lambda x, y, z: (x, y, x + 1, y + 1)
+
+        fake_shapely = types.ModuleType("shapely")
+        fake_shapely.to_wkb = lambda geometry: geometry
+        fake_shapely.box = lambda *args: args
+
+        fake_start = types.ModuleType("start")
+        raw_cfg = {
+            "paths": {
+                "stats_dir": "/tmp/stats",
+                "osm_saving_dir": "/tmp/osm/*.parquet",
+                "processed_dir": "/tmp/processed",
+            },
+            "filenames": {
+                "continents_filename": "continents.parquet",
+                "country_filename": "countries.parquet",
+                "ghsl_filename": "ghsl.gpkg",
+                "africapolis_filename": "africapolis.shp",
+            },
+            "statistics": {
+                "aggregation": {
+                    "max_workers": 1,
+                    "number_of_cpus": 1,
+                    "memory_limit_gb": 1,
+                    "process_non_temporal_osm": False,
+                    "urban_layer_cols": [],
+                },
+                "geographic_layers": {
+                    "urban_area_layers": [],
+                }
+            },
+            "params": {
+                "zoom_level": 8,
+            },
+        }
+        runtime_cfg = real_start.load_statistics_aggregation_runtime_config(raw_cfg)
+        runtime_cfg["statistics"] = raw_cfg["statistics"]
+        fake_start.load_config = lambda path=None: dict(runtime_cfg)
+        fake_start.__getattr__ = lambda name: getattr(real_start, name)
+
+        fake_sgl = types.ModuleType("statistics_geographic_layers")
+        fake_sgl.build_metric_catalog = lambda stats_cfg=None: {
+            "highways": [], "areas": [], "road_types": [], "length_tags": [],
+            "pred_length_tags": [], "osm_length_tags": [], "id_tags": [], "pred_id_tags": [],
+            "osm_id_tags": [], "areas_2": [], "rest": [], "n_osms": [], "rest_length_road": [],
+            "rest_country_onwards": [], "road_classes": {}, "osm_total_cols": [],
+            "osm_total_cols_string": "", "all_cols": [], "paved_tags": [], "paved_strings": "", "zoom_level": 8,
+        }
+        fake_sgl.create_agg_highway_road_type_strings = lambda *a, **k: ""
+        fake_sgl.agg_ratio_strings = lambda *a, **k: ""
+        fake_sgl.create_ratio_strings = lambda *a, **k: ""
+        fake_sgl.create_paved_ratio_strings = lambda *a, **k: ""
+        fake_sgl.create_osm_general_strings = lambda *a, **k: ""
+        fake_sgl.create_osm_urban_rural_strings = lambda *a, **k: ""
+        fake_sgl.create_tile = lambda *a, **k: ""
+
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "duckdb": fake_duckdb,
+                    "numpy": fake_numpy,
+                    "pandas": fake_pandas,
+                    "mercantile": fake_mercantile,
+                    "shapely": fake_shapely,
+                    "start": fake_start,
+                    "statistics_geographic_layers": fake_sgl,
+                },
+            ),
+            mock.patch("os.makedirs"),
+            mock.patch("os.path.exists", return_value=False),
+            mock.patch("os.remove"),
+        ):
+            runpy.run_module("statistics_aggregation", run_name="__main__")

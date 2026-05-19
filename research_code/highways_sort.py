@@ -69,7 +69,7 @@ import logging
 import duckdb
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from start import load_config
+from start import load_config, parse_int, require_path
 from metadata_intersections_and_filtering import finding_tiles_list_for_urban_areas, layer_intersections
 
 # Configure logging
@@ -415,31 +415,31 @@ def main():
     cfg = load_config()
     logger.debug("Configuration loaded")
         
-    ohsome_osm_dir = os.path.abspath(cfg['paths']["ohsome_osm_dir"])
-    osm_saving_dir = os.path.abspath(cfg['paths']["osm_saving_dir"])
-    osm_partitioned_dir = os.path.abspath(cfg['paths']["osm_partitioned_dir"])
-    processed_dir = os.path.abspath(cfg['paths']['processed_dir'])
-    continents_dir = os.path.abspath(cfg['paths']['continents_dir'])
+    ohsome_osm_dir = os.path.abspath(require_path(cfg, 'paths', 'ohsome_osm_dir'))
+    osm_saving_dir = os.path.abspath(require_path(cfg, 'paths', 'osm_saving_dir'))
+    osm_partitioned_dir = os.path.abspath(require_path(cfg, 'paths', 'osm_partitioned_dir'))
+    processed_dir = os.path.abspath(require_path(cfg, 'paths', 'processed_dir'))
+    continents_dir = os.path.abspath(require_path(cfg, 'paths', 'continents_dir'))
 
-    zoom_level = cfg['params']['zoom_level']
+    zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
     logger.info(f"Configuration: zoom_level={zoom_level}, ohsome_dir={ohsome_osm_dir}")
     
     args = {
-        'chunk_size' : cfg['params']['n_max_rows_parquet'],
-        'retries' : cfg['metadata_params']['retries'],
-        'sleep_time' :  cfg['metadata_params']['sleep_time']
+        'chunk_size': parse_int(require_path(cfg, 'params', 'n_max_rows_parquet'), 'params.n_max_rows_parquet', min_value=1),
+        'retries': parse_int(require_path(cfg, 'metadata_params', 'retries'), 'metadata_params.retries', min_value=1),
+        'sleep_time': parse_int(require_path(cfg, 'metadata_params', 'sleep_time'), 'metadata_params.sleep_time', min_value=1),
     }
-    max_workers = max(1, int(cfg['metadata_params']['max_workers']))
+    max_workers = parse_int(require_path(cfg, 'metadata_params', 'max_workers'), 'metadata_params.max_workers', min_value=1)
     logger.debug(f"Processing args: chunk_size={args['chunk_size']}, max_workers={max_workers}")
     
-    continent_filename = cfg['filenames']['continents_filename']
+    continent_filename = require_path(cfg, 'filenames', 'continents_filename')
     # FIX [B-1]: Use resolved filepath for downstream parquet reads.
     continent_filepath = os.path.abspath(continent_filename)
-    overture_url = cfg['filenames']['overture_url']
-    country_filename = cfg['filenames']['country_filename']
-    ghsl_filename = cfg['filenames']['ghsl_filename']
-    africapolis_filename = cfg['filenames']['africapolis_filename']
-    continents_dir = os.path.abspath(cfg['paths']['continents_dir'])
+    overture_url = require_path(cfg, 'filenames', 'overture_url')
+    country_filename = require_path(cfg, 'filenames', 'country_filename')
+    ghsl_filename = require_path(cfg, 'filenames', 'ghsl_filename')
+    africapolis_filename = require_path(cfg, 'filenames', 'africapolis_filename')
+    continents_dir = os.path.abspath(require_path(cfg, 'paths', 'continents_dir'))
     country_filepath = os.path.join(processed_dir, f'intersected_{country_filename}')
     
     logger.debug(f"Geographic files: continents={continent_filename}, country={country_filename}")

@@ -4,9 +4,18 @@
 ### CONFIG ALWAYS AVAILABLE
 ### ————————————————————————
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATA_DIR="${SCRIPT_DIR}/../data/processed/mapillary_metadata/unfiltered"
+cd "$SCRIPT_DIR"
 PYTHON_BIN="/mnt/d//micromamba/envs/eren/python.exe" 
 EXCLUDE_PATTERNS="example_to_skip,bad_file_prefix"   # ✅ available in both HPC and local
+
+eval "$($PYTHON_BIN - <<'PY'
+import os
+from start import load_config
+
+cfg = load_config(script_name='find_osm_segments')
+print(f'export DATA_DIR="{os.path.abspath(cfg["paths"]["unfiltered_metadata_dir"])}"')
+PY
+)"
 
 ### ————————————————————————
 ### BUILD FILE LIST

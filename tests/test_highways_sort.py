@@ -12,6 +12,8 @@ RESEARCH_CODE_DIR = Path(__file__).resolve().parents[1] / "research_code"
 if str(RESEARCH_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(RESEARCH_CODE_DIR))
 
+import start as real_start
+
 
 def import_highways_sort():
     for mod in list(sys.modules.keys()):
@@ -25,6 +27,7 @@ def import_highways_sort():
     fake_pd = types.ModuleType("pandas")
     fake_start = types.ModuleType("start")
     fake_start.load_config = lambda path=None: {}
+    fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
     fake_mif = types.ModuleType("metadata_intersections_and_filtering")
     fake_mif.finding_tiles_list_for_urban_areas = lambda geom, zoom: []
@@ -596,14 +599,13 @@ class HiveAndMainTests(unittest.TestCase):
         continent_filepath = task_capture["tasks"][0][7]
         self.assertTrue(continent_filepath.endswith("continents.parquet"))
 
-    def test_main_normalizes_zero_max_workers_to_one(self):
+    def test_main_raises_when_max_workers_is_zero(self):
         cfg = self._cfg()
         cfg["metadata_params"]["max_workers"] = 0
-        captured = {"workers": []}
 
         class FakeExecutor:
             def __init__(self, max_workers=None):
-                captured["workers"].append(max_workers)
+                raise AssertionError("executor should not be constructed")
 
             def __enter__(self):
                 return self
@@ -621,6 +623,32 @@ class HiveAndMainTests(unittest.TestCase):
             mock.patch.object(self.module, "ProcessPoolExecutor", side_effect=FakeExecutor),
             mock.patch.object(self.module, "hive_partition_osm"),
         ):
-            self.module.main()
+            with self.assertRaises(ValueError):
+                self.module.main()
 
-        self.assertEqual(captured["workers"][0], 1)
+    def test_main_raises_when_max_workers_is_invalid(self):
+        cfg = self._cfg()
+        cfg["metadata_params"]["max_workers"] = "bad"
+
+        class FakeExecutor:
+            def __init__(self, max_workers=None):
+                raise AssertionError("executor should not be constructed")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, tasks):
+                return [None for _ in tasks]
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os, "listdir", return_value=["way_a.parquet"]),
+            mock.patch.object(self.module, "ProcessPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "hive_partition_osm"),
+        ):
+            with self.assertRaises(ValueError):
+                self.module.main()

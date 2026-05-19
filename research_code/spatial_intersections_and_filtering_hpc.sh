@@ -8,7 +8,7 @@
 #SBATCH --time=96:00:00
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
+cd "$SCRIPT_DIR"
 
 # Find Python executable
 if command -v python &> /dev/null; then
@@ -20,49 +20,20 @@ else
     exit 1
 fi
 
-# Load configuration from YAML using Python
-eval $($PYTHON_BIN -c "
-import yaml
+# Load configuration through start.py
+eval "$($PYTHON_BIN - <<'PY'
 import os
-import sys
+from start import load_config
 
-# Find config.yaml in current directory or script location
-if os.path.exists('config.yaml'):
-    config_file = os.path.abspath('config.yaml')
-else:
-    config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
-    if not os.path.exists(config_file):
-        print('export config_found=false', file=sys.stderr)
-        sys.exit(1)
+cfg = load_config(script_name='metadata_intersections_and_filtering')
 
-script_dir = os.path.dirname(config_file)
-
-with open(config_file, 'r') as f:
-    cfg = yaml.safe_load(f)
-
-# Get data_dir
-data_dir = cfg['paths']['data_dir']
-if not os.path.isabs(data_dir):
-    data_dir = os.path.join(script_dir, data_dir)
-
-# Get tile-partitioned metadata directory
-processed_dir = cfg['paths']['processed_dir'].replace('{data_dir}', data_dir)
-if not os.path.isabs(processed_dir):
-    processed_dir = os.path.join(script_dir, processed_dir)
-processed_dir = os.path.normpath(processed_dir)
-
-tile_partitioned_dir = cfg['paths']['tile_partitioned_parquet_raw_metadata_dir'].replace('{processed_dir}', processed_dir)
-if not os.path.isabs(tile_partitioned_dir):
-    tile_partitioned_dir = os.path.join(script_dir, tile_partitioned_dir)
-tile_partitioned_dir = os.path.normpath(os.path.abspath(tile_partitioned_dir))
-
-# Export as shell variables
-print(f'export DATA_DIR=\"{tile_partitioned_dir}\"')
-print(f'export ZOOM_LEVEL={cfg[\"params\"][\"zoom_level\"]}')
-print(f'export URBAN_THRESHOLD={cfg[\"params\"][\"urban_threshold\"]}')
-print(f'export RURAL_THRESHOLD={cfg[\"params\"][\"rural_threshold\"]}')
-print(f'export UPDATED_AFTER=\"{cfg[\"csv_split_params\"][\"updated_after\"]}\"')
-")
+print(f'export DATA_DIR="{os.path.abspath(cfg["paths"]["tile_partitioned_parquet_raw_metadata_dir"])}"')
+print(f'export ZOOM_LEVEL={cfg["params"]["zoom_level"]}')
+print(f'export URBAN_THRESHOLD={cfg["params"]["urban_threshold"]}')
+print(f'export RURAL_THRESHOLD={cfg["params"]["rural_threshold"]}')
+print(f'export UPDATED_AFTER="{cfg["metadata_params"]["updated_after"]}"')
+PY
+)"
 
 echo "DEBUG: DATA_DIR='$DATA_DIR', ZOOM_LEVEL=$ZOOM_LEVEL, URBAN_THRESHOLD=$URBAN_THRESHOLD, RURAL_THRESHOLD=$RURAL_THRESHOLD, UPDATED_AFTER='$UPDATED_AFTER'"
 

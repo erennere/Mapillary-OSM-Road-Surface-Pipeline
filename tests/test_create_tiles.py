@@ -11,6 +11,8 @@ RESEARCH_CODE_DIR = Path(__file__).resolve().parents[1] / "research_code"
 if str(RESEARCH_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(RESEARCH_CODE_DIR))
 
+import start as real_start
+
 
 class FakeGeoDataFrame:
     def __init__(self, geometry=None, crs=None):
@@ -148,6 +150,7 @@ class CreateTilesMainExecutionTests(unittest.TestCase):
             "paths": {"tiles_save_dir": "/tmp/tiles", "starter_dir": "/tmp/starter"},
             "filenames": {"starter_polygon_fn": "", "country_filename": "country.parquet"},
         }
+        fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
         fake_numpy = types.ModuleType("numpy")
         fake_numpy.random = types.SimpleNamespace(randint=lambda low, high, size: [0, 1])
@@ -242,4 +245,52 @@ class CreateTilesMainExecutionTests(unittest.TestCase):
             mock.patch("builtins.print"),
         ):
             runpy.run_module("create_tiles", run_name="__main__")
+
+    def test_main_uses_starter_polygon_when_country_polygon_load_fails(self):
+        class _GeometryValues:
+            values = [FakePolygon((7, 8, 9, 10))]
+
+        class _StarterData:
+            @property
+            def geometry(self):
+                return _GeometryValues()
+
+        def _read_parquet(path):
+            norm = str(path).replace("\\", "/")
+            if norm.endswith("/tmp/starter/country.parquet"):
+                raise RuntimeError("country missing")
+            if norm.endswith("/tmp/starter/starter_fallback.parquet"):
+                return _StarterData()
+            raise AssertionError(f"Unexpected path: {path}")
+
+        fake_modules = self._install_fake_modules(read_parquet_side_effect=_read_parquet)
+        fake_modules["start"].load_config = lambda path=None: {
+            "params": {"zoom_level": 8},
+            "paths": {"tiles_save_dir": "/tmp/tiles", "starter_dir": "/tmp/starter"},
+            "filenames": {"starter_polygon_fn": "starter_fallback.parquet", "country_filename": "country.parquet"},
+        }
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("builtins.print"),
+        ):
+            runpy.run_module("create_tiles", run_name="__main__")
+
+    def test_main_handles_missing_filenames_section(self):
+        fake_modules = self._install_fake_modules(read_parquet_side_effect=RuntimeError("boom"))
+        fake_modules["start"].load_config = lambda path=None: {
+            "params": {"zoom_level": 8},
+            "paths": {"tiles_save_dir": "/tmp/tiles", "starter_dir": "/tmp/starter"},
+        }
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch("os.chdir"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("builtins.print"),
+        ):
+            with self.assertRaises(KeyError):
+                runpy.run_module("create_tiles", run_name="__main__")
 

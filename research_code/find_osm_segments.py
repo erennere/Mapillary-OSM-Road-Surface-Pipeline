@@ -67,7 +67,7 @@ from datetime import datetime
 import random
 import duckdb
 import numpy as np
-from start import load_config
+from start import load_config, parse_float, parse_int, parse_iso_datetime, require_path
 
 # Configure logging
 logging.basicConfig(
@@ -182,9 +182,9 @@ def main():
     if tile is None:
         logging.error(f"Could not extract tile id from filename: {points_filename}")
         sys.exit(1)
-    earth_radius = cfg['params']['earth_radius']
-    zoom_level = cfg['params']['zoom_level']
-    distance_threshold = cfg['params']['distance_threshold']
+    earth_radius = parse_float(require_path(cfg, 'params', 'earth_radius'), 'params.earth_radius', min_value=1.0)
+    zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
+    distance_threshold = parse_float(require_path(cfg, 'params', 'distance_threshold'), 'params.distance_threshold', min_value=0.0)
     func = haversine
     
     points_dir = os.path.abspath(os.path.join(cfg['paths']['unfiltered_metadata_dir'], f'tile={tile}'))
@@ -200,8 +200,12 @@ def main():
         logging.warning(f"Skipping processing: OSM directory not found at {osm_dir}")
         return
 
-    updated_after = datetime.fromisoformat(cfg['metadata_params']['updated_after'])
-    mtime = datetime.fromtimestamp(os.path.getmtime(metadata_filepath)) 
+    updated_after = parse_iso_datetime(require_path(cfg, 'metadata_params', 'updated_after'), 'metadata_params.updated_after')
+    try:
+        mtime = datetime.fromtimestamp(os.path.getmtime(metadata_filepath))
+    except OSError as err:
+        logging.warning(f"Skipping processing: could not stat metadata file {metadata_filepath}: {err}")
+        return
     if mtime < updated_after:
         logging.info(f"Skipping {metadata_filepath} (not modified after {updated_after})")
         sys.stdout.flush()

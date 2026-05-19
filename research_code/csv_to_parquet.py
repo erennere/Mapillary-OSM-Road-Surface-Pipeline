@@ -15,7 +15,7 @@ import logging
 import random
 from datetime import datetime
 import duckdb
-from start import load_config
+from start import load_config, parse_iso_datetime, require_path
 
 # Configure logging
 logging.basicConfig(
@@ -94,9 +94,9 @@ def main():
         logging.error("Usage: python csv_to_parquet.py <tile_name>")
         sys.exit(1)
     
-    path = os.path.abspath(cfg['paths']['splitted_raw_metadata_dir'])
-    parquet_path = os.path.abspath(cfg['paths']['tile_partitioned_parquet_raw_metadata_dir'])
-    updated_after = datetime.fromisoformat(cfg['csv_split_params']['updated_after'])
+    path = os.path.abspath(require_path(cfg, 'paths', 'splitted_raw_metadata_dir'))
+    parquet_path = os.path.abspath(require_path(cfg, 'paths', 'tile_partitioned_parquet_raw_metadata_dir'))
+    updated_after = parse_iso_datetime(require_path(cfg, 'csv_split_params', 'updated_after'), 'csv_split_params.updated_after')
     tile = sys.argv[1]
     if tile.startswith('tile='):
         tile = tile.split('=', 1)[1]
@@ -109,7 +109,11 @@ def main():
         for file in os.listdir(path):
             if file.endswith(".csv") and tile in file and 'missing' not in file:
                 filepath = os.path.join(path, file)
-                mtime = datetime.fromtimestamp(os.path.getmtime(filepath))  # file modification time
+                try:
+                    mtime = datetime.fromtimestamp(os.path.getmtime(filepath))  # file modification time
+                except OSError as err:
+                    logging.warning(f"Skipping split file {filepath}: could not read mtime: {err}")
+                    continue
                 if mtime > updated_after:
                     files.append(file)
         if files:
@@ -119,7 +123,7 @@ def main():
             files = None
     
     if files is None:
-        path = os.path.abspath(cfg['paths']['raw_metadata_dir'])
+        path = os.path.abspath(require_path(cfg, 'paths', 'raw_metadata_dir'))
         logging.debug(f"Searching in raw metadata directory: {path}")
         raw_file = f'metadata_unfiltered_{tile}.csv'
         if os.path.exists(os.path.join(path, raw_file)):

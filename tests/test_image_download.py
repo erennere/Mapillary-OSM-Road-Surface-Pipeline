@@ -13,6 +13,8 @@ RESEARCH_CODE_DIR = Path(__file__).resolve().parents[1] / "research_code"
 if str(RESEARCH_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(RESEARCH_CODE_DIR))
 
+import start as real_start
+
 
 def import_image_download_module():
     sys.modules.pop("image_download", None)
@@ -38,6 +40,7 @@ def import_image_download_module():
 
     fake_start = types.ModuleType("start")
     fake_start.load_config = lambda path=None: {}
+    fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
     fake_glob = types.ModuleType("glob")
 
@@ -169,6 +172,26 @@ class CreateTasksInGeneratorTests(unittest.TestCase):
         self.assertEqual(batches, [])
 
 
+class ParseBoolTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_image_download_module()
+
+    def test_parse_bool_accepts_truthy_and_falsy_strings(self):
+        self.assertTrue(self.module.parse_bool_with_default("true", "image_download.bool_value", False))
+        self.assertTrue(self.module.parse_bool_with_default("YES", "image_download.bool_value", False))
+        self.assertFalse(self.module.parse_bool_with_default("false", "image_download.bool_value", True))
+        self.assertFalse(self.module.parse_bool_with_default("off", "image_download.bool_value", True))
+
+    def test_parse_bool_handles_numeric_values(self):
+        self.assertTrue(self.module.parse_bool_with_default(1, "image_download.bool_value", False))
+        self.assertFalse(self.module.parse_bool_with_default(0, "image_download.bool_value", True))
+
+    def test_parse_bool_returns_default_for_unknown_value(self):
+        self.assertTrue(self.module.parse_bool_with_default("maybe", "image_download.bool_value", True))
+        self.assertFalse(self.module.parse_bool_with_default(None, "image_download.bool_value", False))
+
+
 # ---------------------------------------------------------------------------
 # monitor_connections
 # ---------------------------------------------------------------------------
@@ -232,6 +255,33 @@ class MonitorConnectionsTests(unittest.TestCase):
                 self.module.monitor_connections(interval=2, start=False, check_timeout=1)
 
             self.assertEqual(self.module.allowed_connections_current, 77)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.allowed_connections_current = orig_curr
+            self.module.allowed_connections = orig_allowed
+
+    def test_start_false_completes_cycle_then_exits_on_next_loop_check(self):
+        orig_stop = self.module.thread_stop
+        orig_curr = self.module.allowed_connections_current
+        orig_allowed = self.module.allowed_connections
+
+        sleep_calls = {"count": 0}
+
+        def fake_sleep(_t):
+            sleep_calls["count"] += 1
+            if sleep_calls["count"] >= 2:
+                self.module.thread_stop = True
+
+        try:
+            self.module.thread_stop = False
+            self.module.allowed_connections = 11
+            self.module.allowed_connections_current = 0
+
+            with mock.patch.object(self.module.time, "sleep", side_effect=fake_sleep):
+                self.module.monitor_connections(interval=2, start=False, check_timeout=1)
+
+            self.assertEqual(self.module.allowed_connections_current, 11)
+            self.assertEqual(sleep_calls["count"], 2)
         finally:
             self.module.thread_stop = orig_stop
             self.module.allowed_connections_current = orig_curr
@@ -369,6 +419,45 @@ class WriteMissingImagesTests(unittest.TestCase):
             self.module.thread_stop = orig_stop
             self.module.missing_images = orig_missing
 
+    def test_start_false_completes_wait_cycle_before_stopping(self):
+        filepath = "/tmp/missing_cycle.csv"
+        orig_stop = self.module.thread_stop
+        orig_missing = self.module.missing_images
+
+        writes = []
+        sleep_calls = {"count": 0}
+
+        class FakeDf:
+            def __init__(self, data):
+                self._data = data
+
+            def __len__(self):
+                return len(self._data)
+
+            def to_csv(self, path, index=False):
+                writes.append(path)
+
+        def fake_sleep(_t):
+            sleep_calls["count"] += 1
+            if sleep_calls["count"] >= 2:
+                self.module.thread_stop = True
+
+        try:
+            self.module.thread_stop = False
+            self.module.missing_images = [{"id": "1", "url": "http://x/1"}]
+
+            with (
+                mock.patch.object(self.module.pd, "DataFrame", side_effect=FakeDf),
+                mock.patch.object(self.module.time, "sleep", side_effect=fake_sleep),
+            ):
+                self.module.write_missing_images(filepath, interval=2, start=False, check_timeout=1)
+
+            self.assertGreaterEqual(len(writes), 1)
+            self.assertEqual(sleep_calls["count"], 2)
+        finally:
+            self.module.thread_stop = orig_stop
+            self.module.missing_images = orig_missing
+
 
 # ---------------------------------------------------------------------------
 # process_tasks_wrapper
@@ -499,6 +588,45 @@ class ProcessTasksAndOrchestrateTests(unittest.TestCase):
         self.assertIn("dup_id", self.module.missing_image_ids)
         self.assertEqual(len(removed_files), 2)
 
+    def test_process_tasks_skips_delete_when_failed_files_do_not_exist(self):
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        async def fake_gather(*args, **kwargs):
+            for coro in args:
+                if hasattr(coro, "close"):
+                    coro.close()
+            return [(["img_x", "id_x", "http://x"], True)]
+
+        self.module.missing_images = []
+        self.module.missing_image_ids = set()
+
+        with (
+            mock.patch.object(self.module, "create_tasks_in_generator", return_value=[[({"id": "x", "url": "u"}, "/o", "/r", {})]]),
+            mock.patch.object(self.module.aiohttp, "ClientSession", return_value=FakeSession(), create=True),
+            mock.patch.object(self.module.asyncio, "gather", side_effect=fake_gather, create=True),
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "remove") as remove_mock,
+        ):
+            asyncio.run(
+                self.module.process_tasks(
+                    chunk=[{"id": "x", "url": "u"}],
+                    original_dir="/orig",
+                    resized_dir="/res",
+                    image_size=(64, 64),
+                    batch_size=1,
+                    call_limit=1,
+                    sleep_time=1,
+                    org_save_true=True,
+                )
+            )
+
+        remove_mock.assert_not_called()
+
     def test_orchestrate_runs_workers_and_stops_threads(self):
         calls = {"worker": 0, "threads_started": 0, "threads_joined": 0}
 
@@ -619,6 +747,66 @@ class ProcessTasksAndOrchestrateTests(unittest.TestCase):
         self.assertTrue(all(o is False for _, o, _ in calls["received"]))
         self.assertTrue(all(w is True for _, _, w in calls["received"]))
 
+    def test_orchestrate_normalizes_string_boolean_flags(self):
+        calls = {"received": []}
+
+        class FakeThread:
+            def __init__(self, target=None, args=()):
+                self.target = target
+                self.args = args
+                self.daemon = False
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, *iterables):
+                for args in zip(*iterables):
+                    fn(*args)
+                return []
+
+        def fake_wrapper(chunk, task_args, download_args, batch_size, org_save_true, windows):
+            calls["received"].append((org_save_true, windows))
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", return_value=False),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module.np, "array_split", return_value=[[{"id": 1}]], create=True),
+            mock.patch.object(self.module.threading, "Thread", side_effect=FakeThread),
+            mock.patch.object(self.module, "ThreadPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "process_tasks_wrapper", side_effect=fake_wrapper),
+        ):
+            self.module.orchestrate(
+                metadata=[{"id": 1}],
+                missing_images_file="/tmp/logs/missing.csv",
+                original_dir="/tmp/img/orig",
+                resized_dir="/tmp/img/res",
+                download_args={"image_size": (64, 64), "call_limit": 2, "sleep_time": 1, "allowed_connections": 10},
+                max_workers=1,
+                batch_size=7,
+                windows="false",
+                org_save_true="false",
+            )
+
+        self.assertTrue(calls["received"])
+        self.assertTrue(all(o is False for o, _ in calls["received"]))
+        self.assertTrue(all(w is False for _, w in calls["received"]))
+
     def test_orchestrate_accepts_basename_missing_images_file_path(self):
         calls = {"makedirs": []}
 
@@ -679,6 +867,136 @@ class ProcessTasksAndOrchestrateTests(unittest.TestCase):
 
         self.assertIn(".", calls["makedirs"])
 
+    def test_orchestrate_skips_makedirs_when_directories_exist(self):
+        class FakeThread:
+            def __init__(self, target=None, args=()):
+                self.target = target
+                self.args = args
+                self.daemon = False
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, *iterables):
+                for args in zip(*iterables):
+                    fn(*args)
+                return []
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.os, "makedirs") as makedirs_mock,
+            mock.patch.object(self.module.np, "array_split", return_value=[[{"id": 1}]], create=True),
+            mock.patch.object(self.module.threading, "Thread", side_effect=FakeThread),
+            mock.patch.object(self.module, "ThreadPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "process_tasks_wrapper"),
+        ):
+            self.module.orchestrate(
+                metadata=[{"id": 1}],
+                missing_images_file="/tmp/logs/missing.csv",
+                original_dir="/tmp/img/orig",
+                resized_dir="/tmp/img/res",
+                download_args={"image_size": (64, 64), "call_limit": 2, "sleep_time": 1, "allowed_connections": 10},
+                max_workers=1,
+                batch_size=5,
+                windows=False,
+                org_save_true=False,
+            )
+
+        makedirs_mock.assert_not_called()
+
+    def test_orchestrate_iterates_over_executor_results(self):
+        calls = {"iterated": 0}
+
+        class FakeThread:
+            def __init__(self, target=None, args=()):
+                self.daemon = False
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, *iterables):
+                def _iterable_results():
+                    yield object()
+                    calls["iterated"] += 1
+                    yield object()
+                    calls["iterated"] += 1
+
+                return _iterable_results()
+
+        def fake_pass(*args, **kwargs):
+            return None
+
+        with (
+            mock.patch.object(self.module.os.path, "exists", return_value=True),
+            mock.patch.object(self.module.np, "array_split", return_value=[[{"id": 1}]], create=True),
+            mock.patch.object(self.module.threading, "Thread", side_effect=FakeThread),
+            mock.patch.object(self.module, "ThreadPoolExecutor", side_effect=FakeExecutor),
+            mock.patch.object(self.module, "process_tasks_wrapper", side_effect=fake_pass),
+            mock.patch.object(self.module, "join_threads_with_timeout"),
+        ):
+            self.module.orchestrate(
+                metadata=[{"id": 1}],
+                missing_images_file="/tmp/logs/missing.csv",
+                original_dir="/tmp/img/orig",
+                resized_dir="/tmp/img/res",
+                download_args={"image_size": (64, 64), "call_limit": 2, "sleep_time": 1, "allowed_connections": 10},
+                max_workers=1,
+                batch_size=5,
+                windows=False,
+                org_save_true=False,
+            )
+
+        self.assertEqual(calls["iterated"], 2)
+
+
+class JoinThreadsWithTimeoutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_image_download_module()
+
+    def test_raises_when_any_thread_is_still_alive(self):
+        class FakeThread:
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return True
+
+        with self.assertRaises(RuntimeError):
+            self.module.join_threads_with_timeout([FakeThread()], timeout=1)
+
 
 class ImageFetchAndSaveTests(unittest.TestCase):
     @classmethod
@@ -729,6 +1047,74 @@ class ImageFetchAndSaveTests(unittest.TestCase):
         result = asyncio.run(self.module.fetch_image("http://x", FakeSession()))
         self.assertIsNone(result)
 
+    def test_fetch_image_returns_none_when_response_body_is_not_bytes(self):
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def read(self):
+                return "not-bytes"
+
+        class FakeSession:
+            def get(self, _url, **kwargs):
+                return FakeResponse()
+
+        result = asyncio.run(self.module.fetch_image("http://x", FakeSession()))
+        self.assertIsNone(result)
+
+    def test_fetch_image_returns_none_when_response_body_is_empty(self):
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def read(self):
+                return b""
+
+        class FakeSession:
+            def get(self, _url, **kwargs):
+                return FakeResponse()
+
+        result = asyncio.run(self.module.fetch_image("http://x", FakeSession()))
+        self.assertIsNone(result)
+
+    def test_get_image_waits_for_connection_slot_then_fetches(self):
+        orig_allowed = self.module.allowed_connections_current
+
+        async def fake_sleep(_t):
+            self.module.allowed_connections_current = 1
+
+        async def fake_fetch(_url, _session):
+            return b"data"
+
+        try:
+            self.module.allowed_connections_current = 0
+            with (
+                mock.patch.object(self.module.asyncio, "sleep", side_effect=fake_sleep, create=True),
+                mock.patch.object(self.module, "fetch_image", side_effect=fake_fetch),
+                mock.patch.object(self.module.np, "frombuffer", return_value=[1, 2, 3]),
+                mock.patch.object(self.module.np, "ndarray", list),
+                mock.patch.object(self.module.cv2, "imdecode", return_value=[9, 9]),
+                mock.patch.object(self.module.cv2, "resize", return_value=[5, 5]),
+            ):
+                image, resized = asyncio.run(
+                    self.module.get_image("http://x", (64, 64), session=object(), call_limit=2, sleep_time=1)
+                )
+
+            self.assertEqual(image, [9, 9])
+            self.assertEqual(resized, [5, 5])
+        finally:
+            self.module.allowed_connections_current = orig_allowed
+
     def test_get_image_success_after_retry(self):
         async def fake_sleep(_t):
             return None
@@ -777,7 +1163,7 @@ class ImageFetchAndSaveTests(unittest.TestCase):
         calls = []
         with (
             mock.patch.object(self.module.np, "ndarray", list),
-            mock.patch.object(self.module.cv2, "imwrite", side_effect=lambda p, i: calls.append(p)),
+            mock.patch.object(self.module.cv2, "imwrite", side_effect=lambda p, i: calls.append(p) or True),
         ):
             ok, exc = asyncio.run(
                 self.module.save_image("/tmp/o.png", "/tmp/r.png", [1], [2], org_save_true=False)
@@ -791,6 +1177,33 @@ class ImageFetchAndSaveTests(unittest.TestCase):
         with mock.patch.object(self.module.np, "ndarray", list):
             ok, exc = asyncio.run(
                 self.module.save_image("/tmp/o.png", "/tmp/r.png", "bad", [2], org_save_true=True)
+            )
+
+        self.assertFalse(ok)
+        self.assertTrue(exc)
+
+    def test_save_image_returns_failure_when_imwrite_raises(self):
+        def fail_imwrite(_path, _image):
+            raise RuntimeError("disk error")
+
+        with (
+            mock.patch.object(self.module.np, "ndarray", list),
+            mock.patch.object(self.module.cv2, "imwrite", side_effect=fail_imwrite),
+        ):
+            ok, exc = asyncio.run(
+                self.module.save_image("/tmp/o.png", "/tmp/r.png", [1], [2], org_save_true=True)
+            )
+
+        self.assertFalse(ok)
+        self.assertTrue(exc)
+
+    def test_save_image_returns_failure_when_imwrite_returns_false(self):
+        with (
+            mock.patch.object(self.module.np, "ndarray", list),
+            mock.patch.object(self.module.cv2, "imwrite", return_value=False),
+        ):
+            ok, exc = asyncio.run(
+                self.module.save_image("/tmp/o.png", "/tmp/r.png", [1], [2], org_save_true=True)
             )
 
         self.assertFalse(ok)
@@ -814,6 +1227,26 @@ class ImageFetchAndSaveTests(unittest.TestCase):
 
         self.assertEqual(info[1], "7")
         self.assertFalse(exc)
+
+    def test_process_image_keeps_exception_true_when_get_image_fails(self):
+        async def fake_get_image(*args, **kwargs):
+            return None, None
+
+        row = {"id": "8", "url": "http://x/8"}
+        with mock.patch.object(self.module, "get_image", side_effect=fake_get_image):
+            info, exc = asyncio.run(
+                self.module.process_image(
+                    row,
+                    "/tmp/o",
+                    "/tmp/r",
+                    {"image_size": (32, 32), "call_limit": 2, "sleep_time": 1},
+                    session=object(),
+                    org_save_true=True,
+                )
+            )
+
+        self.assertEqual(info[1], "8")
+        self.assertTrue(exc)
 
 
 class ImageDownloadMainExecutionTests(unittest.TestCase):
@@ -857,6 +1290,7 @@ class ImageDownloadMainExecutionTests(unittest.TestCase):
                 "tile_partitioned_parquet_raw_metadata_dir": "/tmp/tiles",
             },
         }
+        fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
         fake_glob = types.ModuleType("glob")
         return {
@@ -888,5 +1322,67 @@ class ImageDownloadMainExecutionTests(unittest.TestCase):
             mock.patch.dict(sys.modules, modules),
             mock.patch("os.chdir"),
             mock.patch.object(sys, "argv", ["image_download.py", "0", "10"]),
+        ):
+            runpy.run_module("image_download", run_name="__main__")
+
+    def test_main_raises_usage_error_when_chunk_args_not_integers(self):
+        modules = self._fake_modules()
+        modules["glob"].glob = lambda *a, **k: []
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch("os.chdir"),
+            mock.patch.object(sys, "argv", ["image_download.py", "bad", "size"]),
+        ):
+            with self.assertRaises(ValueError):
+                runpy.run_module("image_download", run_name="__main__")
+
+    def test_main_raises_usage_error_when_chunk_bounds_invalid(self):
+        modules = self._fake_modules()
+        modules["glob"].glob = lambda *a, **k: []
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch("os.chdir"),
+            mock.patch.object(sys, "argv", ["image_download.py", "-1", "0"]),
+        ):
+            with self.assertRaises(ValueError):
+                runpy.run_module("image_download", run_name="__main__")
+
+    def test_main_raises_when_image_params_are_invalid_or_missing(self):
+        modules = self._fake_modules()
+        modules["start"].load_config = lambda path=None: {
+            "image_params": {
+                "image_size": [128, 128],
+                "call_limit": "bad",
+                "sleep_time": None,
+                "allowed_connections": "bad",
+                "max_workers": 0,
+                "batch_size": "bad",
+                "windows": "yes",
+                "org_save_true": "no",
+                "random_seed": "bad",
+            },
+            "paths": {},
+        }
+        modules["glob"].glob = lambda *a, **k: []
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch("os.chdir"),
+            mock.patch.object(sys, "argv", ["image_download.py", "0", "10"]),
+        ):
+            with self.assertRaises(ValueError):
+                runpy.run_module("image_download", run_name="__main__")
+
+    def test_main_handles_non_empty_selected_files_chunk(self):
+        modules = self._fake_modules()
+        modules["glob"].glob = lambda *a, **k: ["/tmp/tiles/tile=1/x.parquet"]
+        modules["numpy"].array_split = lambda seq, n: []
+
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch("os.chdir"),
+            mock.patch.object(sys, "argv", ["image_download.py", "0", "1"]),
         ):
             runpy.run_module("image_download", run_name="__main__")

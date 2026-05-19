@@ -11,6 +11,8 @@ RESEARCH_CODE_DIR = Path(__file__).resolve().parents[1] / "research_code"
 if str(RESEARCH_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(RESEARCH_CODE_DIR))
 
+import start as real_start
+
 
 def import_csv_to_parquet_module():
     sys.modules.pop("csv_to_parquet", None)
@@ -18,6 +20,7 @@ def import_csv_to_parquet_module():
     fake_duckdb = types.ModuleType("duckdb")
     fake_start = types.ModuleType("start")
     fake_start.load_config = lambda path=None: {}
+    fake_start.__getattr__ = lambda name: getattr(real_start, name)
 
     with mock.patch.dict(
         sys.modules,
@@ -307,3 +310,120 @@ class CsvToParquetMainTests(unittest.TestCase):
         self.assertEqual(len(converted), 1)
         self.assertIn(f"/tmp/raw/{raw_file}", converted[0][0].replace("\\", "/"))
         self.assertIn(f"/tmp/parquet/tile={tile}", converted[0][1].replace("\\", "/"))
+
+    def test_main_skips_split_file_when_getmtime_raises_oserror(self):
+        cfg = {
+            "paths": {
+                "splitted_raw_metadata_dir": "/tmp/splitted",
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/parquet",
+                "raw_metadata_dir": "/tmp/raw",
+            },
+            "csv_split_params": {"updated_after": "2000-01-01T00:00:00"},
+        }
+        tile = "160-141-8"
+        raw_file = f"metadata_unfiltered_{tile}.csv"
+        split_file = f"metadata_unfiltered_{tile}_part_1.csv"
+
+        converted = []
+
+        def fake_exists(path):
+            norm = path.replace("\\", "/")
+            if norm.endswith("/tmp/splitted"):
+                return True
+            if norm.endswith(f"/tmp/raw/{raw_file}"):
+                return True
+            if norm.endswith(f"/tmp/parquet/tile={tile}"):
+                return False
+            return False
+
+        def fake_getmtime(path):
+            norm = path.replace("\\", "/")
+            if norm.endswith(f"/tmp/splitted/{split_file}"):
+                raise OSError("gone")
+            return 32503680000
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["csv_to_parquet.py", tile]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "listdir", return_value=[split_file]),
+            mock.patch.object(self.module.os.path, "getmtime", side_effect=fake_getmtime),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "convert_csv_to_parquet", side_effect=lambda i, o: converted.append((i, o))),
+        ):
+            self.module.main()
+
+        self.assertEqual(len(converted), 1)
+        self.assertIn(f"/tmp/raw/{raw_file}", converted[0][0].replace("\\", "/"))
+
+    def test_main_raises_with_invalid_updated_after_value(self):
+        cfg = {
+            "paths": {
+                "splitted_raw_metadata_dir": "/tmp/splitted",
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/parquet",
+                "raw_metadata_dir": "/tmp/raw",
+            },
+            "csv_split_params": {"updated_after": "invalid-date"},
+        }
+        tile = "159-145-8"
+
+        converted = []
+
+        def fake_exists(path):
+            norm = path.replace("\\", "/")
+            if norm.endswith("/tmp/splitted"):
+                return True
+            if norm.endswith(f"/tmp/parquet/tile={tile}"):
+                return False
+            return False
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["csv_to_parquet.py", tile]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "listdir", return_value=[f"metadata_unfiltered_{tile}_part_1.csv"]),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "convert_csv_to_parquet", side_effect=lambda i, o: converted.append((i, o))),
+        ):
+            with self.assertRaises(ValueError):
+                self.module.main()
+
+        self.assertEqual(len(converted), 0)
+
+    def test_main_raises_when_csv_split_params_section_missing(self):
+        cfg = {
+            "paths": {
+                "splitted_raw_metadata_dir": "/tmp/splitted",
+                "tile_partitioned_parquet_raw_metadata_dir": "/tmp/parquet",
+                "raw_metadata_dir": "/tmp/raw",
+            },
+        }
+        tile = "159-145-8"
+
+        converted = []
+
+        def fake_exists(path):
+            norm = path.replace("\\", "/")
+            if norm.endswith("/tmp/splitted"):
+                return True
+            if norm.endswith(f"/tmp/parquet/tile={tile}"):
+                return False
+            return False
+
+        with (
+            mock.patch.object(self.module, "load_config", return_value=cfg),
+            mock.patch.object(self.module.sys, "argv", ["csv_to_parquet.py", tile]),
+            mock.patch.object(self.module.os, "chdir"),
+            mock.patch.object(self.module.os.path, "exists", side_effect=fake_exists),
+            mock.patch.object(self.module.os, "listdir", return_value=[f"metadata_unfiltered_{tile}_part_1.csv"]),
+            mock.patch.object(self.module.os.path, "getmtime", return_value=32503680000),
+            mock.patch.object(self.module.os, "makedirs"),
+            mock.patch.object(self.module, "convert_csv_to_parquet", side_effect=lambda i, o: converted.append((i, o))),
+        ):
+            with self.assertRaises(KeyError):
+                self.module.main()
+
+        self.assertEqual(len(converted), 0)
