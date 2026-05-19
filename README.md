@@ -15,6 +15,8 @@ Images will be fed into the ML pipeline, which is maintained separately from thi
 Previously, the spatially filtered metadata was split into 100 chunks. However, this approach may no longer be necessary due to the newly introduced resumability feature in the pipeline.
 
 There is also another repository on the profile: surface-pavedness-to-hot. Since the metadata only contains POINT geometries, but potential users of this pipeline are typically accustomed to working with HOTOSM data, the repository downloads HOTOSM datasets for each country from HDX. It then either merges these datasets with the DL-OSM–enhanced, spatially filtered Mapillary metadata, or reconstructs the same data format directly from the Mapillary-derived data in cases where HOTOSM does not provide a corresponding file.
+
+Also, OSM data comes from SDS, a cloud at Heidelberg University. However, HeiGIT has migrated to RustFS for data storage. I have updated the code accordingly to fetch the OSM data from this source directly, however I have not had the time to test this functionality yet. 
 ```mermaid
 graph TD
     subgraph A[Sequence Discovery]
