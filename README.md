@@ -4,6 +4,26 @@ This repository implements a multi-stage geospatial processing pipeline that int
 
 Conceptually, the pipeline treats Mapillary observations as point- or sequence-based evidence and OSM as the structural road network context. The processing chain first standardizes both sources to a shared tile framework, then performs spatial enrichment and nearest-segment matching, and finally computes geographic and summary statistics. Runtime behavior is controlled through research_code/config.yaml, while shell wrappers provide local and SLURM-compatible execution paths.
 
+## Table of Contents
+
+- [Data Sources](#data-sources)
+- [Mapillary API](#mapillary-api)
+- [OpenStreetMap (OSM)](#openstreetmap-osm)
+- [Geographic Reference Layers](#geographic-reference-layers)
+- [Statistics Inputs](#statistics-inputs)
+- [Pipeline Approaches and Logic](#pipeline-approaches-and-logic)
+- [What This Repository Contains](#what-this-repository-contains)
+- [Canonical Script Run Order](#canonical-script-run-order)
+- [Project Data Flow](#project-data-flow)
+- [Environment Creation](#environment-creation)
+- [Conda](#conda)
+- [Optional pip-based setup](#optional-pip-based-setup)
+- [Starter Data Files You Need Before Running](#starter-data-files-you-need-before-running)
+- [Configuration Parameters You Usually Need To Change](#configuration-parameters-you-usually-need-to-change)
+- [What Is Missing Or External To The Repository](#what-is-missing-or-external-to-the-repository)
+- [Section Documentation](#section-documentation)
+- [Test Commands](#test-commands)
+
 ## Data Sources
 
 ### Mapillary API
