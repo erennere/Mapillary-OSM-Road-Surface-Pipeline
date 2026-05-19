@@ -28,7 +28,7 @@ import sys
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Tuple, Set, Optional, Callable, Any
+from typing import Dict, List, Tuple, Set, Optional, Callable, Any, Literal, overload
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import numpy as np
 import pandas as pd
@@ -37,7 +37,7 @@ from shapely.geometry import box
 from shapely import Point
 import aiohttp
 from tqdm import tqdm
-from start import load_config, parse_bool, parse_int, parse_positive_int, require_path
+from start import load_config, parse_bool, parse_int, parse_positive_int, require_path, resolve_mapillary_token
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -435,6 +435,16 @@ async def async_get_response(session: aiohttp.ClientSession, url: str) -> Option
     except Exception as e:
         logger.warning(f"Session/request error for {url}: {e}")
         return None
+
+
+@overload
+async def data_handling(session: aiohttp.ClientSession, url: str, attempt: int, empty_data_attempts: int, is_data_empty: int, sleep_time: int = 5, max_connections: int = 10000, include_paging: Literal[False] = False) -> Tuple[Optional[pd.DataFrame], int, int, int, float]:
+    ...
+
+
+@overload
+async def data_handling(session: aiohttp.ClientSession, url: str, attempt: int, empty_data_attempts: int, is_data_empty: int, sleep_time: int = 5, max_connections: int = 10000, include_paging: Literal[True] = True) -> Tuple[Optional[pd.DataFrame], int, int, int, float, Dict[str, Any]]:
+    ...
 
 
 async def data_handling(session: aiohttp.ClientSession, url: str, attempt: int, empty_data_attempts: int, is_data_empty: int, sleep_time: int = 5, max_connections: int = 10000, include_paging: bool = False) -> Tuple[Optional[pd.DataFrame], int, int, int, float] | Tuple[Optional[pd.DataFrame], int, int, int, float, Dict[str, Any]]:
@@ -1311,7 +1321,7 @@ if __name__ == '__main__':
     output_directory = os.path.abspath(require_path(config, 'paths', 'raw_metadata_dir'))
     os.makedirs(output_directory, exist_ok=True)
     
-    api_key = require_path(config, 'params', 'mly_key')
+    api_key = resolve_mapillary_token(require_path(config, 'params', 'mly_key'))
 
     query_bbox = require_path(config, 'metadata_params', 'query_bbox')
     metadata_basename = require_path(config, 'metadata_params', 'metadata_basename')

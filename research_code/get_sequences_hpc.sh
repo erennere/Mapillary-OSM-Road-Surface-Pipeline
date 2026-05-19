@@ -7,9 +7,16 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd $SCRIPT_DIR
 
-# Path to Python executable (update this to your environment)
-PYTHON_BIN="python"
-# EXAMPLE for Micromamba: PYTHON_BIN="/path/to/micromamba/envs/your_env/bin/python"
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python)"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+    else
+        echo "❌ Python executable not found. Set PYTHON_BIN or add python/python3 to PATH."
+        exit 1
+    fi
+fi
 
 # Note: Update mly_key with your own Mapillary API key
 # Configuration parameters are loaded from config.yaml

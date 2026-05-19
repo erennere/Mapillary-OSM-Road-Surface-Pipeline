@@ -24,6 +24,7 @@ from config_utils import (
 __all__ = [
     "ConfigResolutionError",
     "load_config",
+    "resolve_mapillary_token",
     "load_statistics_aggregation_runtime_config",
     "load_statistics_runtime_config",
     "parse_bool",
@@ -39,6 +40,21 @@ __all__ = [
 
 
 _MISSING = object()
+
+
+def resolve_mapillary_token(config_token: str, env_var_name: str = "MAPILLARY_ACCESS_TOKEN") -> str:
+    token = (config_token or "").strip()
+    if token and token != "__ENV_MAPILLARY_ACCESS_TOKEN__":
+        return token
+
+    env_token = os.environ.get(env_var_name, "").strip()
+    if env_token:
+        return env_token
+
+    raise ValueError(
+        "Mapillary token is missing. Set get_linestrings_from_tiles.params.mly_key "
+        f"or define {env_var_name}."
+    )
 
 
 class ConfigResolutionError(KeyError):

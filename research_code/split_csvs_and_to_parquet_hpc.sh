@@ -6,7 +6,17 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
-PYTHON_BIN="python"
+
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python)"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+    else
+        echo "❌ Python executable not found. Set PYTHON_BIN or add python/python3 to PATH."
+        exit 1
+    fi
+fi
 
 # Load configuration through start.py
 eval "$($PYTHON_BIN - <<'PY'

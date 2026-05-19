@@ -19,7 +19,7 @@ create_tiles:
 get_linestrings_from_tiles:
   params:
     zoom_level: null  # resolved from 'create_tiles' at runtime
-    mly_key: "MLY|7528238413968457|ed14c6e38679af952a575dbf5ef5ffcf"
+    mly_key: "__ENV_MAPILLARY_ACCESS_TOKEN__"
   paths:
     data_dir: null  # resolved from 'create_tiles' at runtime
     processed_dir: null  # resolved from 'create_tiles' at runtime

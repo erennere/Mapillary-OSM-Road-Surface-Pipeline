@@ -5,7 +5,23 @@
 ### ————————————————————————
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
-PYTHON_BIN="/mnt/d//micromamba/envs/eren/python.exe" 
+
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python)"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+    else
+        echo "❌ Python executable not found. Set PYTHON_BIN or add python/python3 to PATH."
+        exit 1
+    fi
+fi
+
+if [ ! -x "$PYTHON_BIN" ]; then
+    echo "❌ PYTHON_BIN is not executable: $PYTHON_BIN"
+    exit 1
+fi
+
 EXCLUDE_PATTERNS="example_to_skip,bad_file_prefix"   # ✅ available in both HPC and local
 
 eval "$($PYTHON_BIN - <<'PY'

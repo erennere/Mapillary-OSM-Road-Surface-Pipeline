@@ -46,7 +46,7 @@ from vt2geojson import tools as vt2geojson_tools
 import geopandas as gpd
 import pandas as pd
 from tqdm import tqdm
-from start import load_config, parse_int, require_path
+from start import load_config, parse_int, require_path, resolve_mapillary_token
 
 # Configure logging
 logging.basicConfig(
@@ -170,7 +170,7 @@ if __name__ == "__main__":
 
     retries = parse_int(require_path(cfg, 'metadata_params', 'retries'), 'metadata_params.retries', min_value=1)
     zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
-    mly_key = require_path(cfg, 'params', 'mly_key')
+    mly_key = resolve_mapillary_token(require_path(cfg, 'params', 'mly_key'))
 
     tiles_save_dir = os.path.abspath(require_path(cfg, 'paths', 'tiles_save_dir'))
     completed_tiles_dir = os.path.abspath(require_path(cfg, 'paths', 'completed_tiles_dir'))

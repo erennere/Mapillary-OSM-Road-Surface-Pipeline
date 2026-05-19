@@ -20,7 +20,7 @@ import random
 import pandas as pd
 import geopandas as gpd
 from metadata_download import get_metadata
-from start import load_config, parse_bool, parse_int, require_path
+from start import load_config, parse_bool, parse_int, require_path, resolve_mapillary_token
 
 # Configure logging
 logging.basicConfig(
@@ -164,7 +164,7 @@ def main():
     logging.debug(f"Output directory: {data_dir}")
 
     zoom_level = parse_int(require_path(cfg, 'params', 'zoom_level'), 'params.zoom_level', min_value=1)
-    mly_key = require_path(cfg, 'params', 'mly_key')
+    mly_key = resolve_mapillary_token(require_path(cfg, 'params', 'mly_key'))
     missing_attempts = parse_int(require_path(cfg, 'metadata_params', 'missing_attempts'), 'metadata_params.missing_attempts', min_value=1)
     columns = require_path(cfg, 'metadata_columns')
     tiles_col = f'z{zoom_level}_tiles'

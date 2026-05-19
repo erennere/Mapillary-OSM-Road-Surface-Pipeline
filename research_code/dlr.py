@@ -6,7 +6,7 @@ from vt2geojson import tools as vt2geojson_tools
 import geopandas as gpd
 import pandas as pd
 from tqdm import tqdm
-from start import load_config
+from start import load_config, resolve_mapillary_token
 
 def download_and_process_tile(row, mly_key, retries=3):
     z = row["z"]
@@ -62,7 +62,7 @@ if __name__ == "__main__":
     cfg = load_config()
     retries = cfg['metadata_params']['retries']
     zoom_level = 14
-    mly_key = cfg['params']['mly_key']
+    mly_key = resolve_mapillary_token(cfg['params']['mly_key'])
 
     tiles_save_dir = os.getcwd()
     completed_tiles_dir = os.getcwd()
