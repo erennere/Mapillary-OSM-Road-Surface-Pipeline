@@ -29,6 +29,7 @@ import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple, Set, Optional, Callable, Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -436,7 +437,7 @@ async def async_get_response(session: aiohttp.ClientSession, url: str) -> Option
         return None
 
 
-async def data_handling(session: aiohttp.ClientSession, url: str, attempt: int, empty_data_attempts: int, is_data_empty: int, sleep_time: int = 5, max_connections: int = 10000) -> Tuple[Optional[pd.DataFrame], int, int, int, float]:
+async def data_handling(session: aiohttp.ClientSession, url: str, attempt: int, empty_data_attempts: int, is_data_empty: int, sleep_time: int = 5, max_connections: int = 10000, include_paging: bool = False) -> Tuple[Optional[pd.DataFrame], int, int, int, float] | Tuple[Optional[pd.DataFrame], int, int, int, float, Dict[str, Any]]:
     """
     Fetch and parse data from API with rate limiting and retry logic.
     
@@ -486,12 +487,16 @@ async def data_handling(session: aiohttp.ClientSession, url: str, attempt: int, 
         attempt += 1
         logger.debug(f"No data, attempt {attempt}, delaying {delay_between_requests}s")
         await asyncio.sleep(delay_between_requests)
+        if include_paging:
+            return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests, {}
         return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests
 
     if not isinstance(json_data, dict):
         logger.warning(f"Unexpected JSON payload type from {url}: {type(json_data).__name__}")
         attempt += 1
         await asyncio.sleep(delay_between_requests)
+        if include_paging:
+            return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests, {}
         return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests
     
     data = json_data.get('data', None)
@@ -499,21 +504,51 @@ async def data_handling(session: aiohttp.ClientSession, url: str, attempt: int, 
         logger.warning(f"Unexpected JSON format from {url}")
         attempt += 1
         await asyncio.sleep(delay_between_requests)
+        if include_paging:
+            return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests, {}
         return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests
     
     data = pd.DataFrame(data)
     if data.empty:
         if is_data_empty >= empty_data_attempts:
             logger.debug(f"Empty data limit reached ({is_data_empty}/{empty_data_attempts})")
+            if include_paging:
+                return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests, {}
             return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests
         
         is_data_empty += 1
         logger.debug(f"Empty data response {is_data_empty}/{empty_data_attempts}")
         await asyncio.sleep(delay_between_requests)
+        if include_paging:
+            return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests, json_data.get('paging', {}) if isinstance(json_data, dict) else {}
         return None, attempt, empty_data_attempts, is_data_empty, delay_between_requests
     
     logger.debug(f"Retrieved {len(data)} records from {url}")
+    if include_paging:
+        return data, attempt, empty_data_attempts, is_data_empty, delay_between_requests, json_data.get('paging', {}) if isinstance(json_data, dict) else {}
     return data, attempt, empty_data_attempts, is_data_empty, delay_between_requests
+
+
+def _next_page_url(current_url: str, paging: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(paging, dict):
+        return None
+
+    next_url = paging.get('next')
+    if isinstance(next_url, str) and next_url.strip():
+        return next_url.strip()
+
+    cursors = paging.get('cursors')
+    if not isinstance(cursors, dict):
+        return None
+
+    after = cursors.get('after')
+    if not isinstance(after, str) or not after.strip():
+        return None
+
+    parsed = urlparse(current_url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    query['after'] = [after.strip()]
+    return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
 
 
 async def fetch_sequence_paginated_images(sequence: str, url: str, session: aiohttp.ClientSession, call_limit: int = 5, empty_data_attempts: int = 3,
@@ -540,11 +575,12 @@ async def fetch_sequence_paginated_images(sequence: str, url: str, session: aioh
     attempt = 0
     is_data_empty = 0
     tracker = 0
-    is_first_batch = True
+    page_url = url
+    seen_page_urls: Set[str] = set()
     
-    while attempt < call_limit:
-        data, attempt, empty_data_attempts, is_data_empty, delay = await data_handling(
-            session, url, attempt, empty_data_attempts, is_data_empty, sleep_time, max_connections
+    while attempt < call_limit and page_url:
+        data, attempt, empty_data_attempts, is_data_empty, delay, paging = await data_handling(
+            session, page_url, attempt, empty_data_attempts, is_data_empty, sleep_time, max_connections, include_paging=True
         )
         
         if data is None:
@@ -569,11 +605,17 @@ async def fetch_sequence_paginated_images(sequence: str, url: str, session: aioh
             logger.debug(f"Sequence {sequence}: no new images for {retries} calls, stopping")
             break
         
-        if is_first_batch and len(data) < API_MAX_RESULTS_PER_BBOX:
-            logger.debug(f"Sequence {sequence}: <{API_MAX_RESULTS_PER_BBOX} images, stopping early")
+        seen_page_urls.add(page_url)
+        next_url = _next_page_url(page_url, paging)
+        if not next_url:
+            logger.debug(f"Sequence {sequence}: pagination completed (no next page)")
             break
-        
-        is_first_batch = False
+
+        if next_url in seen_page_urls:
+            logger.warning(f"Sequence {sequence}: detected repeated page URL, stopping pagination loop")
+            break
+
+        page_url = next_url
     
     if metadata_images:
         result = pd.concat(metadata_images, ignore_index=True)

@@ -1486,8 +1486,8 @@ class MetadataSequenceProcessingTests(unittest.TestCase):
 
         async def fake_data_handling(*_args, **_kwargs):
             if responses:
-                return responses.pop(0), 0, 3, 0, 0.0
-            return None, 1, 3, 0, 0.0
+                return responses.pop(0), 0, 3, 0, 0.0, {"next": "http://next"}
+            return None, 1, 3, 0, 0.0, {}
 
         with (
             mock.patch.object(self.module, "data_handling", side_effect=fake_data_handling),
@@ -1672,8 +1672,8 @@ class MetadataSequenceProcessingTests(unittest.TestCase):
         async def fake_data_handling(*_args, **_kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
-                return None, 0, 3, 0, 0.0
-            return valid_batch, 1, 3, 0, 0.0
+                return None, 0, 3, 0, 0.0, {}
+            return valid_batch, 1, 3, 0, 0.0, {}
 
         with (
             mock.patch.object(self.module, "data_handling", side_effect=fake_data_handling),
@@ -1707,7 +1707,7 @@ class MetadataSequenceProcessingTests(unittest.TestCase):
 
         async def fake_data_handling(*_args, **_kwargs):
             calls["n"] += 1
-            return full_batch, 0, 3, 0, 0.0
+            return full_batch, 0, 3, 0, 0.0, {"next": "http://next"}
 
         with (
             mock.patch.object(self.module, "data_handling", side_effect=fake_data_handling),
@@ -1749,6 +1749,54 @@ class MetadataSequenceProcessingTests(unittest.TestCase):
 
         self.assertEqual(missing, "seq-empty")
         self.assertIsNotNone(df)
+
+    def test_fetch_sequence_paginated_images_follows_paging_next_url(self):
+        page_1 = self.FakeDf([
+            {
+                "id": "img1",
+                "thumb_original_url": "u1",
+                "computed_geometry": {"coordinates": [1.0, 2.0]},
+                "captured_at": 10,
+            }
+        ])
+        page_2 = self.FakeDf([
+            {
+                "id": "img2",
+                "thumb_original_url": "u2",
+                "computed_geometry": {"coordinates": [3.0, 4.0]},
+                "captured_at": 11,
+            }
+        ])
+
+        requested_urls = []
+
+        async def fake_data_handling(_session, current_url, *_args, **_kwargs):
+            requested_urls.append(current_url)
+            if current_url == "http://page-1":
+                return page_1, 0, 3, 0, 0.0, {"next": "http://page-2"}
+            return page_2, 0, 3, 0, 0.0, {}
+
+        with (
+            mock.patch.object(self.module, "data_handling", side_effect=fake_data_handling),
+            mock.patch.object(self.module.pd, "concat", side_effect=lambda frames, **kwargs: self.FakeDf([r for f in frames for r in f.rows])),
+        ):
+            data, missing = self.module.asyncio.run(
+                self.module.fetch_sequence_paginated_images(
+                    sequence="seq_pages",
+                    url="http://page-1",
+                    session=object(),
+                    call_limit=3,
+                    empty_data_attempts=3,
+                    retries=2,
+                    sleep_time=0,
+                    max_connections=100,
+                )
+            )
+
+        self.assertIsNone(missing)
+        self.assertFalse(data.empty)
+        self.assertEqual(len(data), 2)
+        self.assertEqual(requested_urls, ["http://page-1", "http://page-2"])
 
 
 # ---------------------------------------------------------------------------
