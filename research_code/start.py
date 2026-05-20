@@ -24,9 +24,10 @@ from config_utils import (
 __all__ = [
     "ConfigResolutionError",
     "load_config",
+    "resolve_config",
     "resolve_mapillary_token",
-    "load_statistics_aggregation_runtime_config",
     "load_statistics_runtime_config",
+    "load_statistics_aggregation_runtime_config",
     "parse_bool",
     "parse_bool_with_default",
     "parse_float",
@@ -35,26 +36,13 @@ __all__ = [
     "parse_positive_int",
     "require_path",
     "require_section",
-    "resolve_config",
 ]
 
 
 _MISSING = object()
 
 
-def resolve_mapillary_token(config_token: str, env_var_name: str = "MAPILLARY_ACCESS_TOKEN") -> str:
-    token = (config_token or "").strip()
-    if token and token != "__ENV_MAPILLARY_ACCESS_TOKEN__":
-        return token
-
-    env_token = os.environ.get(env_var_name, "").strip()
-    if env_token:
-        return env_token
-
-    raise ValueError(
-        "Mapillary token is missing. Set get_linestrings_from_tiles.params.mly_key "
-        f"or define {env_var_name}."
-    )
+# Exceptions
 
 
 class ConfigResolutionError(KeyError):
@@ -64,124 +52,29 @@ class ConfigResolutionError(KeyError):
         super().__init__(message)
 
 
-def _lookup_path(mapping: dict[str, Any], path: tuple[str, ...]) -> Any:
-    current: Any = mapping
-    for key in path:
-        if not isinstance(current, dict) or key not in current:
-            return _MISSING
-        current = current[key]
-    return current
+# Public API: config loading and resolution
 
 
-def _ordered_script_names(raw_config: dict[str, Any]) -> list[str]:
-    return list(raw_config.keys())
+def load_config(
+    filepath: str = "./config.yaml",
+    script_name: str | None = None,
+    cli_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    config_path = _resolve_config_path(filepath)
+    with open(config_path, "r", encoding="utf-8") as f:
+        raw_config = yaml.safe_load(f)
 
+    if not isinstance(raw_config, dict):
+        raise TypeError("Config root must be a mapping of script sections")
 
-def _find_owner_value(script_name: str, path: tuple[str, ...], raw_config: dict[str, Any]) -> Any:
-    for candidate_name in _ordered_script_names(raw_config):
-        if candidate_name == script_name:
-            break
-        candidate_value = _lookup_path(raw_config[candidate_name], path)
-        if candidate_value is not _MISSING and candidate_value is not None:
-            return copy.deepcopy(candidate_value)
-    return _MISSING
+    inferred_script_name = script_name is None
+    resolved_script_name = script_name or _infer_script_name()
+    resolved_cfg = resolve_config(resolved_script_name, raw_config, cli_overrides=cli_overrides)
 
+    if inferred_script_name:
+        return _build_inferred_runtime_config(resolved_script_name, resolved_cfg)
 
-def _merge_cli_overrides(base: dict[str, Any], overrides: dict[str, Any], path: tuple[str, ...]) -> None:
-    for key, value in overrides.items():
-        current_path = path + (key,)
-        dotted_path = ".".join(current_path)
-        if key not in base:
-            raise KeyError(f"Unknown CLI override key '{dotted_path}'")
-
-        current_value = base[key]
-        if isinstance(value, dict) and isinstance(current_value, dict):
-            _merge_cli_overrides(current_value, value, current_path)
-            continue
-
-        base[key] = copy.deepcopy(value)
-
-
-def _resolve_node(script_name: str, node: Any, path: tuple[str, ...], raw_config: dict[str, Any]) -> Any:
-    if node is None:
-        owner_value = _find_owner_value(script_name, path, raw_config)
-        if owner_value is _MISSING:
-            dotted_path = ".".join(path)
-            raise ConfigResolutionError(
-                script_name,
-                dotted_path,
-                f"Config key '{dotted_path}' in section '{script_name}' could not be resolved from any section.",
-            )
-        return owner_value
-
-    if isinstance(node, dict):
-        resolved = {}
-        for key, value in node.items():
-            resolved[key] = _resolve_node(script_name, value, path + (key,), raw_config)
-        return resolved
-
-    return copy.deepcopy(node)
-
-
-def _format_path_values(cfg: dict[str, Any]) -> None:
-    if "paths" not in cfg:
-        return
-
-    paths = cfg["paths"]
-    if not isinstance(paths, dict):
-        raise TypeError("Config section 'paths' must be a mapping")
-
-    formatted_paths = format_mapping_values(paths, {}, "config.paths")
-    cfg["paths"] = formatted_paths
-
-    if "filenames" not in cfg:
-        return
-
-    filenames = cfg["filenames"]
-    if not isinstance(filenames, dict):
-        raise TypeError("Config section 'filenames' must be a mapping")
-
-    cfg["filenames"] = format_mapping_values(filenames, dict(formatted_paths), "config.filenames")
-
-
-def _validate_no_none(script_name: str, node: Any, path: tuple[str, ...]) -> None:
-    if node is None:
-        dotted_path = ".".join(path)
-        raise ConfigResolutionError(
-            script_name,
-            dotted_path,
-            f"Config key '{dotted_path}' in section '{script_name}' resolved to null.",
-        )
-
-    if isinstance(node, dict):
-        for key, value in node.items():
-            _validate_no_none(script_name, value, path + (key,))
-
-
-def _infer_script_name() -> str:
-    caller_frame = inspect.stack()[2]
-    return Path(caller_frame.filename).stem
-
-
-def _resolve_config_path(filepath: str) -> Path:
-    config_path = Path(filepath)
-    if config_path.is_absolute():
-        return config_path
-    return Path(__file__).resolve().parent / config_path
-
-
-def _build_inferred_runtime_config(script_name: str, cfg: dict[str, Any]) -> dict[str, Any]:
-    if script_name == "statistics_geographic_layers":
-        runtime_cfg = load_statistics_runtime_config(cfg)
-        runtime_cfg["statistics"] = copy.deepcopy(require_section(cfg, "statistics"))
-        return runtime_cfg
-
-    if script_name == "statistics_aggregation":
-        runtime_cfg = load_statistics_aggregation_runtime_config(cfg)
-        runtime_cfg["statistics"] = copy.deepcopy(require_section(cfg, "statistics"))
-        return runtime_cfg
-
-    return cfg
+    return resolved_cfg
 
 
 def resolve_config(
@@ -213,26 +106,36 @@ def resolve_config(
     return resolved
 
 
-def load_config(
-    filepath: str = "./config.yaml",
-    script_name: str | None = None,
-    cli_overrides: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    config_path = _resolve_config_path(filepath)
-    with open(config_path, "r", encoding="utf-8") as f:
-        raw_config = yaml.safe_load(f)
+def resolve_mapillary_token(config_token: str, env_var_name: str = "MAPILLARY_ACCESS_TOKEN") -> str:
+    token = (config_token or "").strip()
+    if token and token != "__ENV_MAPILLARY_ACCESS_TOKEN__":
+        return token
 
-    if not isinstance(raw_config, dict):
-        raise TypeError("Config root must be a mapping of script sections")
+    env_token = os.environ.get(env_var_name, "").strip()
+    if env_token:
+        return env_token
 
-    inferred_script_name = script_name is None
-    resolved_script_name = script_name or _infer_script_name()
-    resolved_cfg = resolve_config(resolved_script_name, raw_config, cli_overrides=cli_overrides)
+    raise ValueError(
+        "Mapillary token is missing. Set get_linestrings_from_tiles.params.mly_key "
+        f"or define {env_var_name}."
+    )
 
-    if inferred_script_name:
-        return _build_inferred_runtime_config(resolved_script_name, resolved_cfg)
 
-    return resolved_cfg
+def _build_inferred_runtime_config(script_name: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    if script_name == "statistics_geographic_layers":
+        runtime_cfg = load_statistics_runtime_config(cfg)
+        runtime_cfg["statistics"] = copy.deepcopy(require_section(cfg, "statistics"))
+        return runtime_cfg
+
+    if script_name == "statistics_aggregation":
+        runtime_cfg = load_statistics_aggregation_runtime_config(cfg)
+        runtime_cfg["statistics"] = copy.deepcopy(require_section(cfg, "statistics"))
+        return runtime_cfg
+
+    return cfg
+
+
+# Public API: stage-specific runtime builders
 
 
 def load_statistics_runtime_config(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -338,3 +241,118 @@ def load_statistics_aggregation_runtime_config(cfg: dict[str, Any] | None = None
     }
     runtime_cfg["sub_threads"] = max(1, runtime_cfg["number_of_cpus"] // max_workers)
     return runtime_cfg
+
+
+# Internal helpers: call-site and path resolution
+
+
+def _infer_script_name() -> str:
+    caller_frame = inspect.stack()[2]
+    return Path(caller_frame.filename).stem
+
+
+def _resolve_config_path(filepath: str) -> Path:
+    config_path = Path(filepath)
+    if config_path.is_absolute():
+        return config_path
+    return Path(__file__).resolve().parent / config_path
+
+
+# Internal helpers: config lookup and merge
+
+
+def _ordered_script_names(raw_config: dict[str, Any]) -> list[str]:
+    return list(raw_config.keys())
+
+
+def _lookup_path(mapping: dict[str, Any], path: tuple[str, ...]) -> Any:
+    current: Any = mapping
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return _MISSING
+        current = current[key]
+    return current
+
+
+def _find_owner_value(script_name: str, path: tuple[str, ...], raw_config: dict[str, Any]) -> Any:
+    for candidate_name in _ordered_script_names(raw_config):
+        if candidate_name == script_name:
+            break
+        candidate_value = _lookup_path(raw_config[candidate_name], path)
+        if candidate_value is not _MISSING and candidate_value is not None:
+            return copy.deepcopy(candidate_value)
+    return _MISSING
+
+
+def _merge_cli_overrides(base: dict[str, Any], overrides: dict[str, Any], path: tuple[str, ...]) -> None:
+    for key, value in overrides.items():
+        current_path = path + (key,)
+        dotted_path = ".".join(current_path)
+        if key not in base:
+            raise KeyError(f"Unknown CLI override key '{dotted_path}'")
+
+        current_value = base[key]
+        if isinstance(value, dict) and isinstance(current_value, dict):
+            _merge_cli_overrides(current_value, value, current_path)
+            continue
+
+        base[key] = copy.deepcopy(value)
+
+
+# Internal helpers: recursive resolution and validation
+
+
+def _resolve_node(script_name: str, node: Any, path: tuple[str, ...], raw_config: dict[str, Any]) -> Any:
+    if node is None:
+        owner_value = _find_owner_value(script_name, path, raw_config)
+        if owner_value is _MISSING:
+            dotted_path = ".".join(path)
+            raise ConfigResolutionError(
+                script_name,
+                dotted_path,
+                f"Config key '{dotted_path}' in section '{script_name}' could not be resolved from any section.",
+            )
+        return owner_value
+
+    if isinstance(node, dict):
+        resolved = {}
+        for key, value in node.items():
+            resolved[key] = _resolve_node(script_name, value, path + (key,), raw_config)
+        return resolved
+
+    return copy.deepcopy(node)
+
+
+def _format_path_values(cfg: dict[str, Any]) -> None:
+    if "paths" not in cfg:
+        return
+
+    paths = cfg["paths"]
+    if not isinstance(paths, dict):
+        raise TypeError("Config section 'paths' must be a mapping")
+
+    formatted_paths = format_mapping_values(paths, {}, "config.paths")
+    cfg["paths"] = formatted_paths
+
+    if "filenames" not in cfg:
+        return
+
+    filenames = cfg["filenames"]
+    if not isinstance(filenames, dict):
+        raise TypeError("Config section 'filenames' must be a mapping")
+
+    cfg["filenames"] = format_mapping_values(filenames, dict(formatted_paths), "config.filenames")
+
+
+def _validate_no_none(script_name: str, node: Any, path: tuple[str, ...]) -> None:
+    if node is None:
+        dotted_path = ".".join(path)
+        raise ConfigResolutionError(
+            script_name,
+            dotted_path,
+            f"Config key '{dotted_path}' in section '{script_name}' resolved to null.",
+        )
+
+    if isinstance(node, dict):
+        for key, value in node.items():
+            _validate_no_none(script_name, value, path + (key,))
